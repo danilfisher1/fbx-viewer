@@ -1,0 +1,29 @@
+# зависимости и сборка
+/node_modules
+/.next/
+/out/
+/build
+/dist
+/.output/
+/.vercel/
+/.nitro/
+/.tanstack/
+*.tsbuildinfo
+
+# окружение
+.env
+.env*.local
+*.pem
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# модели и архивы не коммитим — просмотрщик грузит их локально с компьютера
+*.fbx
+*.zip
+*.rar
+*.7z
+artifacts/
+screenshots/
+public/scenes/
+.node_modules.lock

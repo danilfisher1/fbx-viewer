@@ -1,0 +1,301 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import Scene from "./Scene";
+import SunControls from "./SunControls";
+import InfoPanel from "./InfoPanel";
+import { LocalFile, ingestFiles, revokeAll } from "@/lib/localFiles";
+import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
+import { SUN_PRESETS } from "@/lib/sunPresets";
+import { log, LogEntry, subscribeLogs } from "@/lib/logger";
+
+export default function ViewerUI() {
+  const [locals, setLocals] = useState<LocalFile[]>([]);
+  const [manifest, setManifest] = useState<SceneManifest | null>(null);
+  const [progress, setProgress] = useState<LoadProgress>({
+    phase: "idle",
+    percent: 0,
+    message: "",
+  });
+  const [showVPM, setShowVPM] = useState(true);
+  const [showNPM, setShowNPM] = useState(false);
+  const [showLights, setShowLights] = useState(true);
+  const [showInfo, setShowInfo] = useState(false);
+  const [showLog, setShowLog] = useState(true);
+  const [geo, setGeo] = useState<GeoJsonData | null>(null);
+  const [fitTrigger, setFitTrigger] = useState(0);
+  const [dragOver, setDragOver] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const localsRef = useRef<LocalFile[]>([]);
+
+  const [sun, setSun] = useState<SunState>({ preset: "day", ...SUN_PRESETS.day });
+
+  useEffect(() => {
+    return subscribeLogs((entry) => {
+      setLogs((prev) => [...prev.slice(-200), entry]);
+    });
+  }, []);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  useEffect(() => {
+    localsRef.current = locals;
+  }, [locals]);
+
+  // Освободить blob-URL при уходе со страницы
+  useEffect(() => () => revokeAll(localsRef.current), []);
+
+  const requestFit = useCallback(() => setFitTrigger((n) => n + 1), []);
+
+  const handleFiles = useCallback(
+    async (fileList: FileList | File[]) => {
+      setBusy(true);
+      setLogs([]);
+      setProgress({ phase: "scan", percent: 1, message: "Старт…" });
+      log.info("Выбор папки / файлов начат");
+
+      revokeAll(localsRef.current);
+      localsRef.current = [];
+      setLocals([]);
+      setManifest(null);
+      setGeo(null);
+
+      try {
+        const { locals: next, manifest: m } = await ingestFiles(fileList, setProgress);
+        setLocals(next);
+        setManifest(m);
+
+        const hasVpm = m.vpmModels.length + m.groundModels.length > 0;
+        const hasNpm = m.npmModels.length > 0;
+        if (!hasVpm && hasNpm) {
+          setShowVPM(false);
+          setShowNPM(true);
+        } else {
+          setShowVPM(true);
+          setShowNPM(false);
+        }
+
+        if (m.vpmModels.length + m.npmModels.length === 0) {
+          setBusy(false);
+          setProgress({
+            phase: "done",
+            percent: 100,
+            message: "FBX не найдены — смотри лог",
+          });
+        }
+      } catch (e) {
+        log.error("Ошибка обработки папки", e);
+        setBusy(false);
+        setProgress({ phase: "idle", percent: 0, message: "Ошибка — см. консоль" });
+      }
+    },
+    []
+  );
+
+  const onInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      void handleFiles(e.target.files);
+      e.target.value = "";
+    }
+  };
+
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      void handleFiles(e.dataTransfer.files);
+    }
+  };
+
+  const onModelProgress = useCallback(
+    (p: LoadProgress) => {
+      setProgress(p);
+      if (p.phase === "done") {
+        setBusy(false);
+        setTimeout(() => requestFit(), 400);
+      }
+    },
+    [requestFit]
+  );
+
+  const clearScene = () => {
+    revokeAll(locals);
+    setLocals([]);
+    setManifest(null);
+    setGeo(null);
+    setBusy(false);
+    setProgress({ phase: "idle", percent: 0, message: "" });
+    log.info("Сцена сброшена");
+  };
+
+  const hasScene = manifest !== null && locals.length > 0;
+  const loading = busy || (progress.phase !== "idle" && progress.phase !== "done");
+
+  return (
+    <div className="viewer-root">
+      {hasScene ? (
+        <Scene
+          locals={locals}
+          manifest={manifest}
+          showVPM={showVPM}
+          showNPM={showNPM}
+          showLights={showLights}
+          sun={sun}
+          fitTrigger={fitTrigger}
+          onGeoLoaded={setGeo}
+          onProgress={onModelProgress}
+        />
+      ) : (
+        <div
+          className={`drop-zone ${dragOver ? "drag-over" : ""}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+        >
+          <div className="drop-content">
+            <h1>FBX Scene Viewer</h1>
+            <p className="subtitle">
+              Выбери корневую папку проекта — например
+              <br />
+              <code>2026-10-02_ВПМ_НПМ</code>
+            </p>
+            <div className="drop-actions">
+              <button className="btn primary" onClick={() => folderInputRef.current?.click()}>
+                Выбрать папку
+              </button>
+              <button className="btn" onClick={() => filesInputRef.current?.click()}>
+                Выбрать файлы
+              </button>
+            </div>
+            <p className="hint">
+              Внутри: <b>Высокополигональная</b> (SM_*_001… + Ground, zip или папки)
+              <br />и <b>Низкополигональная</b> (0102_* …)
+            </p>
+          </div>
+        </div>
+      )}
+
+      <input
+        ref={folderInputRef}
+        type="file"
+        // @ts-expect-error webkitdirectory
+        webkitdirectory=""
+        directory=""
+        multiple
+        style={{ display: "none" }}
+        onChange={onInputChange}
+      />
+      <input
+        ref={filesInputRef}
+        type="file"
+        multiple
+        accept=".fbx,.png,.jpg,.jpeg,.geojson,.json,.tga,.webp,.zip"
+        style={{ display: "none" }}
+        onChange={onInputChange}
+      />
+
+      {(hasScene || loading) && (
+        <>
+          {hasScene && (
+            <div className="top-bar">
+              <div className="scene-name">
+                Локальная сцена
+                <span className="file-count"> · {locals.length} файлов</span>
+              </div>
+              <div className="toggle-group">
+                <button
+                  className={showVPM ? "active" : ""}
+                  onClick={() => setShowVPM((v) => !v)}
+                  disabled={
+                    (manifest?.vpmModels.length || 0) + (manifest?.groundModels.length || 0) === 0
+                  }
+                >
+                  ВПМ
+                </button>
+                <button
+                  className={showNPM ? "active" : ""}
+                  onClick={() => setShowNPM((v) => !v)}
+                  disabled={(manifest?.npmModels.length || 0) === 0}
+                >
+                  НПМ
+                </button>
+                <button
+                  className={showLights ? "active" : ""}
+                  onClick={() => setShowLights((v) => !v)}
+                  disabled={(manifest?.lightFiles.length || 0) === 0}
+                >
+                  Свет
+                </button>
+                <button onClick={requestFit}>В кадр</button>
+                <button onClick={() => setShowInfo((v) => !v)}>Инфо</button>
+                <button className={showLog ? "active" : ""} onClick={() => setShowLog((v) => !v)}>
+                  Лог
+                </button>
+                <button onClick={() => folderInputRef.current?.click()}>+ Папка</button>
+                <button onClick={clearScene}>Сброс</button>
+              </div>
+            </div>
+          )}
+
+          {hasScene && (
+            <div className="left-panel">
+              <SunControls sun={sun} onChange={setSun} />
+            </div>
+          )}
+
+          <InfoPanel geo={geo} visible={showInfo} onClose={() => setShowInfo(false)} />
+
+          {showLog && logs.length > 0 && (
+            <div className="log-panel">
+              <div className="panel-header">
+                <span className="panel-title">Отчёт</span>
+                <button className="close-btn" onClick={() => setShowLog(false)}>
+                  ×
+                </button>
+              </div>
+              <div className="log-body">
+                {logs.map((l, i) => (
+                  <div key={i} className={`log-line log-${l.level}`}>
+                    {l.message}
+                  </div>
+                ))}
+                <div ref={logEndRef} />
+              </div>
+            </div>
+          )}
+
+          {loading && (
+            <div className="loading-overlay">
+              <div className="progress-card">
+                <div className="progress-meta">
+                  <span>{progress.message || "Загрузка…"}</span>
+                  <span className="progress-pct">{Math.round(progress.percent)}%</span>
+                </div>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${Math.max(2, progress.percent)}%` }} />
+                </div>
+                {progress.detail && <p className="progress-detail">{progress.detail}</p>}
+              </div>
+            </div>
+          )}
+
+          {hasScene && !loading && (
+            <div className="footer-hint">
+              ЛКМ — вращение · ПКМ — панорама · Колесо — зум · «В кадр» — подогнать
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
