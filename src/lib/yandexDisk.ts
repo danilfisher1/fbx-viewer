@@ -12,6 +12,12 @@ import { log, formatBytes } from "./logger";
  */
 
 const API = "https://cloud-api.yandex.net/v1/disk/public/resources";
+/**
+ * Яндекс защищает скачивание от хотлинка: с Referer чужого сайта downloader.disk.yandex.ru
+ * отвечает 403 без CORS-заголовков (браузер пишет «Failed to fetch»), с localhost — пропускает.
+ * Без Referer скачивание разрешено с любого адреса.
+ */
+const NO_REFERRER: RequestInit = { referrerPolicy: "no-referrer" };
 const PAGE = 1000;
 
 const CACHE_NAME = "fbx-viewer-projects-v1";
@@ -42,7 +48,7 @@ interface Resource {
 }
 
 async function api<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(url, NO_REFERRER);
   if (!res.ok) {
     let msg = `${res.status}`;
     try {
@@ -92,7 +98,7 @@ async function downloadHref(publicKey: string, item: Resource): Promise<string> 
 
 /** Скачивание с прогрессом по байтам (чтение потока). */
 async function fetchWithProgress(url: string, onBytes: (n: number) => void): Promise<Blob> {
-  const res = await fetch(url);
+  const res = await fetch(url, NO_REFERRER);
   if (!res.ok || !res.body) throw new Error(`Скачивание не удалось (${res.status})`);
   const reader = res.body.getReader();
   const chunks: BlobPart[] = [];
