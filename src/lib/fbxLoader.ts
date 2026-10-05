@@ -147,6 +147,45 @@ export function extractLights(lightGroup: THREE.Group): THREE.Light[] {
   return lights;
 }
 
+/** Если центр модели уже далеко от нуля — координаты «запечены» в FBX, сдвигать по geojson второй раз нельзя. */
+const BAKED_COORD_THRESHOLD = 1000;
+
+export function applyGeoPositionSmart(group: THREE.Group, geo: GeoJsonData | null, label: string): void {
+  if (!geo) return;
+  group.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(group);
+  if (box.isEmpty()) {
+    const v = new THREE.Vector3();
+    group.traverse((o) => {
+      o.getWorldPosition(v);
+      box.expandByPoint(v);
+    });
+  }
+  if (!box.isEmpty()) {
+    const c = box.getCenter(new THREE.Vector3());
+    const s = box.getSize(new THREE.Vector3());
+    log.info(
+      `${label}: центр (${c.x.toFixed(0)}, ${c.y.toFixed(0)}, ${c.z.toFixed(0)}), размер ${s.x.toFixed(0)}×${s.y.toFixed(0)}×${s.z.toFixed(0)}`
+    );
+    if (Math.abs(c.x) > BAKED_COORD_THRESHOLD || Math.abs(c.z) > BAKED_COORD_THRESHOLD) {
+      log.info(`${label}: координаты уже внутри FBX — сдвиг по geojson не применяется`);
+      return;
+    }
+  }
+  applyGeoPosition(group, geo);
+}
+
+/** WebGL ограничивает число uniform-ов шейдера: сотни источников света ломают ВСЕ материалы. */
+export const MAX_SCENE_LIGHTS = 24;
+
+export function limitLights(lights: THREE.Light[], max = MAX_SCENE_LIGHTS): THREE.Light[] {
+  if (lights.length <= max) return lights;
+  log.warn(`Источников света ${lights.length} — показываю ${max} (лимит видеокарты)`);
+  const out: THREE.Light[] = [];
+  for (let i = 0; i < max; i++) out.push(lights[Math.floor((i * lights.length) / max)]);
+  return out;
+}
+
 export function applyGeoPosition(group: THREE.Group, geo: GeoJsonData | null): void {
   if (!geo || !geo.features?.length) return;
   const feature = geo.features[0];

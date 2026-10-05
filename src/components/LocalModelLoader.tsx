@@ -7,7 +7,8 @@ import {
   loadFBX,
   applyExternalTextures,
   extractLights,
-  applyGeoPosition,
+  applyGeoPositionSmart,
+  limitLights,
   collectGlassParams,
 } from "@/lib/fbxLoader";
 import { SceneManifest, GeoJsonData, LoadProgress } from "@/lib/types";
@@ -162,7 +163,7 @@ export default function LocalModelLoader({
             disposeObject(group);
             return;
           }
-          applyGeoPosition(group, geo);
+          applyGeoPositionSmart(group, geo, model.name);
 
           let meshes = 0;
           const toRemove: THREE.Object3D[] = [];
@@ -216,6 +217,7 @@ export default function LocalModelLoader({
         bump(label);
       }
 
+      const allLights: THREE.Light[] = [];
       for (const lightFile of lightList) {
         if (cancelled) return;
         const url = getUrl(lightFile.path, lightFile.name);
@@ -235,17 +237,20 @@ export default function LocalModelLoader({
               break;
             }
           }
-          applyGeoPosition(lightFbx, geo || mainGeo);
+          applyGeoPositionSmart(lightFbx, geo || mainGeo, lightFile.name);
           lightFbx.updateMatrixWorld(true);
-          const lights = extractLights(lightFbx);
-          lights.forEach((l) => {
-            l.updateWorldMatrix(true, false);
-            lightsGroup.attach(l);
-          });
+          allLights.push(...extractLights(lightFbx));
         } catch (e) {
           log.error(`Не загрузился свет ${lightFile.path}`, e);
         }
         bump(label);
+      }
+
+      if (!cancelled) {
+        limitLights(allLights).forEach((l) => {
+          l.updateWorldMatrix(true, false);
+          lightsGroup.attach(l);
+        });
       }
 
       if (!cancelled) {

@@ -50,28 +50,26 @@ function stripZipExt(name: string): string {
   return name.replace(/\.zip$/i, "");
 }
 
-/** Detect ВПМ / НПМ from any path segment (Cyrillic folder names included). */
+function branchOfSegment(seg: string): "vpm" | "npm" | "unknown" {
+  const s = seg.toLowerCase();
+  const v =
+    s.includes("высокополигон") || s.includes("впм") || s === "vpm" ||
+    s.includes("highpoly") || s.includes("high-poly") || s.includes("high_poly");
+  const n =
+    s.includes("низкополигон") || s.includes("нпм") || s === "npm" ||
+    s.includes("lowpoly") || s.includes("low-poly") || s.includes("low_poly");
+  // «2026-10-02_ВПМ_НПМ» содержит оба слова — такой сегмент ничего не говорит
+  if (v && !n) return "vpm";
+  if (n && !v) return "npm";
+  return "unknown";
+}
+
+/** ВПМ / НПМ по пути: побеждает ближайшая к файлу папка (кириллица тоже). */
 export function detectBranch(path: string): "vpm" | "npm" | "unknown" {
-  const p = path.toLowerCase();
-  if (
-    p.includes("высокополигон") ||
-    p.includes("впм") ||
-    /(^|\/)vpm(\/|$)/.test(p) ||
-    p.includes("highpoly") ||
-    p.includes("high-poly") ||
-    p.includes("high_poly")
-  ) {
-    return "vpm";
-  }
-  if (
-    p.includes("низкополигон") ||
-    p.includes("нпм") ||
-    /(^|\/)npm(\/|$)/.test(p) ||
-    p.includes("lowpoly") ||
-    p.includes("low-poly") ||
-    p.includes("low_poly")
-  ) {
-    return "npm";
+  const segs = normalizePath(path).split("/");
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const b = branchOfSegment(segs[i]);
+    if (b !== "unknown") return b;
   }
   return "unknown";
 }

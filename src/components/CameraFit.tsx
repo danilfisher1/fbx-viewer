@@ -22,9 +22,13 @@ export default function CameraFit({ fitTrigger, padding = 1.6 }: Props) {
       const box = new THREE.Box3();
       let hasMeshes = false;
 
+      const isShown = (o: THREE.Object3D) => {
+        for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
+        return true;
+      };
+
       scene.traverse((obj) => {
-        if ((obj as THREE.Mesh).isMesh && obj.visible) {
-          if (obj.type === "AxesHelper") return;
+        if ((obj as THREE.Mesh).isMesh && isShown(obj)) {
           const mesh = obj as THREE.Mesh;
           if (!mesh.geometry) return;
           mesh.updateWorldMatrix(true, false);
@@ -50,7 +54,7 @@ export default function CameraFit({ fitTrigger, padding = 1.6 }: Props) {
       const fov = ((camera as THREE.PerspectiveCamera).fov * Math.PI) / 180;
       let distance = (maxDim / (2 * Math.tan(fov / 2))) * padding;
       distance = Math.max(distance, 10);
-      distance = Math.min(distance, 5000);
+      distance = Math.min(distance, 200000);
 
       log.info(
         `Автокадр: центр (${center.x.toFixed(1)}, ${center.y.toFixed(1)}, ${center.z.toFixed(1)}) размер ${maxDim.toFixed(1)} м, дистанция ${distance.toFixed(1)}`
@@ -61,7 +65,7 @@ export default function CameraFit({ fitTrigger, padding = 1.6 }: Props) {
 
       camera.position.copy(newPos);
       camera.near = Math.max(0.1, distance / 1000);
-      camera.far = Math.max(5000, distance * 10);
+      camera.far = Math.max(20000, distance * 10);
       camera.updateProjectionMatrix();
       camera.lookAt(center);
 
