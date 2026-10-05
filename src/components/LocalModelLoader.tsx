@@ -26,7 +26,7 @@ interface Props {
   showLights: boolean;
   onGeoLoaded?: (geo: GeoJsonData | null) => void;
   onProgress?: (p: LoadProgress) => void;
-  /** Габариты сцены и отметка земли — для солнца/теней и подложки. */
+  /** Габариты сцены и отметка земли — для солнца и теней. */
   onBounds?: (b: SceneBounds | null) => void;
 }
 

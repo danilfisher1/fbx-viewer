@@ -28,7 +28,7 @@ export default function CameraFit({ fitTrigger, padding = 1.6 }: Props) {
       };
 
       scene.traverse((obj) => {
-        // Небо и подложка земли огромные — в рамку не идут.
+        // Небо огромное — в рамку не идёт.
         if ((obj as THREE.Mesh).isMesh && isShown(obj) && !obj.userData.noFit) {
           const mesh = obj as THREE.Mesh;
           if (!mesh.geometry) return;

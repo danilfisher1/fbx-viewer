@@ -94,7 +94,7 @@ function EnvironmentSystem({ sun }: { sun: SunState }) {
     sky.material.uniforms.sunPosition.value.set(x, y, z);
     sky.visible = !night;
     scene.background = night ? new THREE.Color("#05070d") : null;
-    // Дымка у горизонта прячет край подложки, как атмосфера в движке.
+    // Дымка у горизонта — атмосферная перспектива, как в движке.
     scene.fog = night ? new THREE.Fog("#05070d", 600, 4000) : new THREE.Fog(horizonColor(y), 900, 5500);
   }, [scene, sky, sun.azimuth, sun.elevation, night]);
 
@@ -176,18 +176,6 @@ function SunLight({ sun, bounds, showVPM, showNPM }: { sun: SunState; bounds: Sc
   );
 }
 
-/** Земля вокруг участка: горизонт и приёмник теней, чуть ниже отметки рельефа. */
-function GroundPlane({ bounds }: { bounds: SceneBounds | null }) {
-  if (!bounds) return null;
-  const c = bounds.box.getCenter(new THREE.Vector3());
-  return (
-    <mesh position={[c.x, bounds.groundY - 0.2, c.z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow userData={{ noFit: true }}>
-      <circleGeometry args={[6000, 64]} />
-      <meshStandardMaterial color="#5f6058" roughness={1} metalness={0} />
-    </mesh>
-  );
-}
-
 export default function Scene({
   locals,
   manifest,
@@ -215,7 +203,6 @@ export default function Scene({
     >
       <EnvironmentSystem sun={sun} />
       <SunLight sun={sun} bounds={bounds} showVPM={showVPM} showNPM={showNPM} />
-      <GroundPlane bounds={bounds} />
       <Suspense fallback={null}>
         <LocalModelLoader
           locals={locals}
