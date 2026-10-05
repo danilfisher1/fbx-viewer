@@ -224,17 +224,19 @@ export const DEFAULT_GLASS: GlassParams = {
 };
 
 /**
- * Стекло через transmission (а не opacity): видно интерьер/объекты за ним, отражается небо
- * из карты окружения, нет проблем с сортировкой прозрачных. Теней не отбрасывает.
+ * Стекло через transmission (а не opacity): видно интерьер/объекты за ним, отражения — по Френелю
+ * от карты окружения, без проблем сортировки. Теней не отбрасывает.
+ * Стекло всегда прозрачное: metallicity из geojson (до 0.85) превращала его в глухое зеркало,
+ * поэтому металличность не берём, а прозрачность не ниже 0.85.
  */
 export function createGlassMaterial(params: GlassParams, name = ""): THREE.MeshPhysicalMaterial {
   const c = params.color_RGB;
   const mat = new THREE.MeshPhysicalMaterial({
     name,
     color: new THREE.Color(c.Red / 255, c.Green / 255, c.Blue / 255),
-    roughness: params.roughness,
-    metalness: params.metallicity,
-    transmission: Math.min(params.transparency, 0.95),
+    roughness: Math.min(params.roughness, 0.1),
+    metalness: 0,
+    transmission: THREE.MathUtils.clamp(Math.max(params.transparency, 0.85), 0, 0.97),
     ior: params.refraction || 1.45,
     thickness: 0.02,
     specularIntensity: 1,

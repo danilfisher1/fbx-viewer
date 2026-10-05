@@ -211,12 +211,15 @@ export async function applyEmbeddedPbr(group: THREE.Group, embedded: EmbeddedMat
     if (isGlassMaterialName(name) && !em?.textures.length) {
       p = Promise.resolve(createGlassMaterial(DEFAULT_GLASS, name));
     } else if (em?.textures.length) {
+      // В НПМ прозрачны только M_Glass_*; opacity-карты атласов зданий (*_Main_*) не прорезаем —
+      // окна там зеркальные (metallic белый, roughness чёрный). Прозрачность остаётся у Flora/GroundEl.
+      const building = /_Main_/i.test(name);
       p = (async () => {
         const maps: Record<string, THREE.Texture | null> = {};
         await Promise.all(
           em.textures.map(async (t) => {
             const role = embeddedRole(t);
-            if (!role || maps[role]) return;
+            if (!role || maps[role] || (building && role === "alphaMap")) return;
             const blob = new Blob([t.data as BlobPart]);
             maps[role] = await loadTextureFromBlob(blob, role === "map", NPM_TEXTURE_SIZE).catch(() => null);
           })

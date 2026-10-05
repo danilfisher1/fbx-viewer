@@ -7,6 +7,8 @@ import { ToneMappingMode } from "postprocessing";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
 import { Sky } from "three/addons/objects/Sky.js";
+import { EXRLoader } from "three/addons/loaders/EXRLoader.js";
+import { log } from "@/lib/logger";
 import LocalModelLoader, { SceneBounds } from "./LocalModelLoader";
 import CameraFit from "./CameraFit";
 import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
@@ -44,50 +46,79 @@ function makeSky(): Sky {
 }
 
 /**
- * Физическое небо: видимое — меш вокруг камеры, для отражений и рассеянного света —
- * PMREM-карта окружения из того же неба. Пересчитывается при смене солнца (без сети, без HDR с CDN).
+ * HDRI окружения — встроенные карты Blender Material Preview (CC0, Poly Haven), лежат в public/hdri.
+ * Дают рассеянный свет и то, что отражают зеркальные окна НПМ и металл — как в Blender.
  */
-function SkyEnvironment({ sun }: { sun: SunState }) {
+const HDRI_BY_PRESET: Record<SunState["preset"], string> = {
+  morning: "/hdri/sunrise.exr",
+  day: "/hdri/forest.exr",
+  evening: "/hdri/sunset.exr",
+  night: "/hdri/night.exr",
+};
+const ENV_INTENSITY: Record<SunState["preset"], number> = { morning: 0.6, day: 0.6, evening: 0.6, night: 0.25 };
+
+const exrLoader = new EXRLoader();
+const hdriCache = new Map<string, Promise<THREE.DataTexture>>();
+function loadHdri(url: string): Promise<THREE.DataTexture> {
+  let p = hdriCache.get(url);
+  if (!p) {
+    p = exrLoader.loadAsync(url).then((t) => {
+      t.mapping = THREE.EquirectangularReflectionMapping;
+      return t;
+    });
+    hdriCache.set(url, p);
+  }
+  return p;
+}
+
+/**
+ * Окружение: видимое физическое небо с облаками вокруг камеры (фон) +
+ * HDRI-карта для освещения и отражений (Sky Light в терминах движка).
+ */
+function EnvironmentSystem({ sun }: { sun: SunState }) {
   const { gl, scene } = useThree();
   const [sky] = useState(makeSky);
-  const [envSky] = useState(makeSky);
-  const [envScene] = useState(() => new THREE.Scene());
   const night = sun.preset === "night";
 
   useEffect(() => {
     sky.scale.setScalar(12000);
     sky.userData.noFit = true;
     scene.add(sky);
-    envSky.scale.setScalar(1000);
-    envScene.add(envSky);
     return () => {
       scene.remove(sky);
-      envScene.remove(envSky);
     };
-  }, [scene, sky, envScene, envSky]);
+  }, [scene, sky]);
 
   useEffect(() => {
     const [x, y, z] = sunDirection(sun.azimuth, sun.elevation);
-    const pos = new THREE.Vector3(x, y, z);
-    sky.material.uniforms.sunPosition.value.copy(pos);
-    envSky.material.uniforms.sunPosition.value.copy(pos);
-    const pmrem = new THREE.PMREMGenerator(gl);
-    const rt = pmrem.fromScene(envScene, 0, 1, 5000);
-    pmrem.dispose();
-    scene.environment = rt.texture;
-    // Карта неба очень яркая: держим её слабой, иначе солнце и тени тонут (подобрано на реальной сцене).
-    scene.environmentIntensity = night ? 0.02 : 0.12;
+    sky.material.uniforms.sunPosition.value.set(x, y, z);
     sky.visible = !night;
     scene.background = night ? new THREE.Color("#05070d") : null;
     // Дымка у горизонта прячет край подложки, как атмосфера в движке.
     scene.fog = night ? new THREE.Fog("#05070d", 600, 4000) : new THREE.Fog(horizonColor(y), 900, 5500);
-    return () => {
-      if (scene.environment === rt.texture) scene.environment = null;
-      rt.dispose();
-    };
-  }, [gl, scene, sky, envSky, envScene, sun.azimuth, sun.elevation, night]);
+  }, [scene, sky, sun.azimuth, sun.elevation, night]);
 
-  // Небо всегда центрировано на камере, иначе на 15 км от начала координат упрётся в far.
+  useEffect(() => {
+    let disposed = false;
+    let rt: THREE.WebGLRenderTarget | null = null;
+    loadHdri(HDRI_BY_PRESET[sun.preset])
+      .then((tex) => {
+        if (disposed) return;
+        const pmrem = new THREE.PMREMGenerator(gl);
+        rt = pmrem.fromEquirectangular(tex);
+        pmrem.dispose();
+        scene.environment = rt.texture;
+        scene.environmentIntensity = ENV_INTENSITY[sun.preset];
+      })
+      .catch((e) => log.warn("HDRI окружения не загрузилось", e));
+    return () => {
+      disposed = true;
+      if (rt && scene.environment === rt.texture) scene.environment = null;
+      rt?.dispose();
+    };
+  }, [gl, scene, sun.preset]);
+
+  // Небо центрировано на камере, иначе на 15 км от начала координат упрётся в far.
   useFrame(({ camera }) => {
     sky.position.copy(camera.position);
   });
@@ -175,13 +206,14 @@ export default function Scene({
       shadows={{ type: THREE.PCFSoftShadowMap }}
       camera={{ position: [30, 40, 60], fov: 45, near: 0.1, far: 20000 }}
       gl={{ antialias: false, powerPreference: "high-performance", stencil: false }}
-      onCreated={({ gl }) => {
+      onCreated={({ gl, scene, camera }) => {
+        if (import.meta.env.DEV) Object.assign(window, { __three: { gl, scene, camera } });
         gl.setClearColor("#1a1a1e");
         // Экспозиция для ToneMapping-эффекта (AgX берёт её у рендерера): физическое небо очень яркое.
         gl.toneMappingExposure = 0.75;
       }}
     >
-      <SkyEnvironment sun={sun} />
+      <EnvironmentSystem sun={sun} />
       <SunLight sun={sun} bounds={bounds} showVPM={showVPM} showNPM={showNPM} />
       <GroundPlane bounds={bounds} />
       <Suspense fallback={null}>
