@@ -4,6 +4,9 @@ import { createServerFn } from "@tanstack/react-start";
  * Проекты для архитекторов: ссылка /p/<slug> открывает модель с Яндекс Диска без ручной загрузки.
  * Админка защищена одним паролем из переменной окружения ADMIN_PASSWORD (Vercel → Settings →
  * Environment Variables). Сессия — httpOnly-cookie с HMAC от пароля: смена пароля разлогинивает всех.
+ *
+ * Список проектов — один JSON в приватном хранилище Vercel Blob (fbx-viewer-blob, токен
+ * BLOB_READ_WRITE_TOKEN Vercel добавляет сам). Без токена (локальная разработка) — в памяти процесса.
  */
 
 export interface Project {
@@ -20,6 +23,32 @@ export interface PublicProject {
 }
 
 const COOKIE = "fbx_admin";
+const PROJECTS_PATH = "projects.json";
+
+const memory = globalThis as typeof globalThis & { __fbxProjects__?: Project[] };
+
+async function readProjects(): Promise<Project[]> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return memory.__fbxProjects__ ?? [];
+  const { get } = await import("@vercel/blob");
+  const res = await get(PROJECTS_PATH, { access: "private", useCache: false });
+  if (!res) return [];
+  const text = await new Response(res.stream).text();
+  return JSON.parse(text) as Project[];
+}
+
+async function writeProjects(list: Project[]): Promise<void> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    memory.__fbxProjects__ = list;
+    return;
+  }
+  const { put } = await import("@vercel/blob");
+  await put(PROJECTS_PATH, JSON.stringify(list), {
+    access: "private",
+    allowOverwrite: true,
+    addRandomSuffix: false,
+    contentType: "application/json",
+  });
+}
 
 async function sessionToken(): Promise<string | null> {
   const password = process.env.ADMIN_PASSWORD;
@@ -86,9 +115,8 @@ export const adminLogout = createServerFn({ method: "POST" }).handler(async () =
 
 export const listProjects = createServerFn({ method: "GET" }).handler(async (): Promise<Project[]> => {
   await requireAdmin();
-  const { getSql } = await import("./db");
-  const sql = await getSql();
-  return sql<Project>`select id, slug, name, yandex_url, created_at::text as created_at from projects order by created_at desc`;
+  const list = await readProjects();
+  return list.sort((a, b) => b.created_at.localeCompare(a.created_at));
 });
 
 export const createProject = createServerFn({ method: "POST" })
@@ -101,12 +129,16 @@ export const createProject = createServerFn({ method: "POST" })
     const { randomBytes } = await import("node:crypto");
     // Случайный slug: ссылки нельзя подобрать перебором.
     const slug = randomBytes(6).toString("base64url");
-    const { getSql } = await import("./db");
-    const sql = await getSql();
-    const rows = await sql<Project>`
-      insert into projects (slug, name, yandex_url) values (${slug}, ${name}, ${yandexUrl})
-      returning id, slug, name, yandex_url, created_at::text as created_at`;
-    return rows[0];
+    const list = await readProjects();
+    const project: Project = {
+      id: list.reduce((m, p) => Math.max(m, p.id), 0) + 1,
+      slug,
+      name,
+      yandex_url: yandexUrl,
+      created_at: new Date().toISOString(),
+    };
+    await writeProjects([...list, project]);
+    return project;
   });
 
 export const updateProject = createServerFn({ method: "POST" })
@@ -116,9 +148,12 @@ export const updateProject = createServerFn({ method: "POST" })
     const name = String(data.name ?? "").trim().slice(0, 200);
     if (!name) throw new Error("Укажите название проекта");
     const yandexUrl = normalizeYandexUrl(String(data.yandexUrl ?? ""));
-    const { getSql } = await import("./db");
-    const sql = await getSql();
-    await sql`update projects set name = ${name}, yandex_url = ${yandexUrl} where id = ${Number(data.id)}`;
+    const list = await readProjects();
+    const p = list.find((x) => x.id === Number(data.id));
+    if (!p) throw new Error("Проект не найден");
+    p.name = name;
+    p.yandex_url = yandexUrl;
+    await writeProjects(list);
     return { ok: true };
   });
 
@@ -126,9 +161,8 @@ export const deleteProject = createServerFn({ method: "POST" })
   .inputValidator((d: { id: number }) => d)
   .handler(async ({ data }) => {
     await requireAdmin();
-    const { getSql } = await import("./db");
-    const sql = await getSql();
-    await sql`delete from projects where id = ${Number(data.id)}`;
+    const list = await readProjects();
+    await writeProjects(list.filter((x) => x.id !== Number(data.id)));
     return { ok: true };
   });
 
@@ -136,9 +170,6 @@ export const deleteProject = createServerFn({ method: "POST" })
 export const getProjectBySlug = createServerFn({ method: "GET" })
   .inputValidator((d: { slug: string }) => d)
   .handler(async ({ data }): Promise<PublicProject | null> => {
-    const { getSql } = await import("./db");
-    const sql = await getSql();
-    const rows = await sql<{ name: string; yandex_url: string }>`
-      select name, yandex_url from projects where slug = ${String(data.slug ?? "")} limit 1`;
-    return rows[0] ? { name: rows[0].name, yandexUrl: rows[0].yandex_url } : null;
+    const p = (await readProjects()).find((x) => x.slug === String(data.slug ?? ""));
+    return p ? { name: p.name, yandexUrl: p.yandex_url } : null;
   });
