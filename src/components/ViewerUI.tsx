@@ -8,9 +8,16 @@ import InfoPanel from "./InfoPanel";
 import { LocalFile, ingestFiles, revokeAll } from "@/lib/localFiles";
 import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
 import { SUN_PRESETS } from "@/lib/sunPresets";
-import { log, LogEntry, subscribeLogs } from "@/lib/logger";
+import { log, LogEntry, subscribeLogs, formatBytes } from "@/lib/logger";
+import { downloadYandexProject } from "@/lib/yandexDisk";
+import type { PublicProject } from "@/lib/projects";
 
-export default function ViewerUI() {
+interface ViewerUIProps {
+  /** Проект по ссылке /p/<slug>: модель скачивается с Яндекс Диска автоматически. */
+  remote?: PublicProject;
+}
+
+export default function ViewerUI({ remote }: ViewerUIProps = {}) {
   const [locals, setLocals] = useState<LocalFile[]>([]);
   const [manifest, setManifest] = useState<SceneManifest | null>(null);
   const [progress, setProgress] = useState<LoadProgress>({
@@ -107,6 +114,29 @@ export default function ViewerUI() {
     []
   );
 
+  // Проект по ссылке: скачать с Яндекс Диска и загрузить как выбранную папку.
+  const remoteStarted = useRef(false);
+  useEffect(() => {
+    if (!remote || remoteStarted.current) return;
+    remoteStarted.current = true;
+    setBusy(true);
+    setProgress({ phase: "scan", percent: 0, message: `Скачивание «${remote.name}» с Яндекс Диска…` });
+    downloadYandexProject(remote.yandexUrl, ({ loaded, total, file }) => {
+      setProgress({
+        phase: "scan",
+        percent: total ? Math.round((loaded / total) * 100) : 0,
+        message: `Скачивание «${remote.name}»: ${formatBytes(loaded)} из ${formatBytes(total)}`,
+        detail: file,
+      });
+    })
+      .then((files) => handleFiles(files))
+      .catch((e) => {
+        log.error("Не удалось скачать проект с Яндекс Диска", e);
+        setBusy(false);
+        setProgress({ phase: "done", percent: 100, message: `Ошибка: ${e instanceof Error ? e.message : e}` });
+      });
+  }, [remote, handleFiles]);
+
   const onInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       void handleFiles(e.target.files);
@@ -160,6 +190,8 @@ export default function ViewerUI() {
           onGeoLoaded={setGeo}
           onProgress={onModelProgress}
         />
+      ) : remote ? (
+        <div className="drop-zone" />
       ) : (
         <div
           className={`drop-zone ${dragOver ? "drag-over" : ""}`}
@@ -217,7 +249,7 @@ export default function ViewerUI() {
           {hasScene && (
             <div className="top-bar">
               <div className="scene-name">
-                Локальная сцена
+                {remote ? remote.name : "Локальная сцена"}
                 <span className="file-count"> · {locals.length} файлов</span>
               </div>
               <div className="toggle-group">
@@ -249,8 +281,8 @@ export default function ViewerUI() {
                 <button className={showLog ? "active" : ""} onClick={() => setShowLog((v) => !v)}>
                   Лог
                 </button>
-                <button onClick={() => folderInputRef.current?.click()}>+ Папка</button>
-                <button onClick={clearScene}>Сброс</button>
+                {!remote && <button onClick={() => folderInputRef.current?.click()}>+ Папка</button>}
+                {!remote && <button onClick={clearScene}>Сброс</button>}
               </div>
             </div>
           )}

@@ -128,3 +128,32 @@ html, body {
   position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
   z-index: 15; font-size: 12px; color: rgba(255,255,255,0.35); pointer-events: none; white-space: nowrap;
 }
+
+/* ---- Админка проектов ---- */
+.admin-root { height: 100vh; overflow-y: auto; background: radial-gradient(ellipse at 50% 0%, #1a1f2e 0%, var(--bg) 60%); }
+.admin-wrap { max-width: 760px; margin: 0 auto; padding: 40px 16px 80px; display: flex; flex-direction: column; gap: 16px; }
+.admin-head { display: flex; justify-content: space-between; align-items: center; }
+.admin-head h1 { font-size: 24px; font-weight: 600; }
+.admin-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+.admin-card h2 { font-size: 16px; font-weight: 600; }
+.admin-card code { background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; }
+.admin-form { display: flex; flex-direction: column; gap: 12px; }
+.admin-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.admin-form input {
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 10px 12px; font-size: 14px; font-family: inherit; width: 100%;
+}
+.admin-form input:focus { outline: none; border-color: var(--accent); }
+.admin-form .btn { align-self: flex-start; }
+.admin-error { color: var(--danger); font-size: 13px; }
+.admin-list { list-style: none; display: flex; flex-direction: column; }
+.admin-list li { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.admin-list li:first-child { border-top: none; padding-top: 0; }
+.admin-item-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 260px; }
+.admin-item-main a { color: var(--accent-hover); font-size: 13px; text-decoration: none; }
+.admin-item-main .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn.small { padding: 7px 14px; font-size: 13px; }
+.btn.danger { color: var(--danger); }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }

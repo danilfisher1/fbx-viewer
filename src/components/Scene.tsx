@@ -27,7 +27,10 @@ interface Props {
   onProgress: (p: LoadProgress) => void;
 }
 
-const SKY_PARAMS = { turbidity: 3, rayleigh: 1.2, mieCoefficient: 0.004, mieDirectionalG: 0.8 };
+// Чистая атмосфера: при высокой мутности горизонт и всё под ним заливает молочной дымкой.
+const SKY_PARAMS = { turbidity: 1.6, rayleigh: 1.4, mieCoefficient: 0.002, mieDirectionalG: 0.8 };
+/** Ниже горизонта — ровный тёмный фон (как вьюпорт Blender), а не белое марево атмосферы. */
+const BELOW_HORIZON = "vec3(0.045, 0.047, 0.052)";
 
 function makeSky(): Sky {
   const sky = new Sky();
@@ -36,6 +39,10 @@ function makeSky(): Sky {
   u.rayleigh.value = SKY_PARAMS.rayleigh;
   u.mieCoefficient.value = SKY_PARAMS.mieCoefficient;
   u.mieDirectionalG.value = SKY_PARAMS.mieDirectionalG;
+  sky.material.fragmentShader = sky.material.fragmentShader.replace(
+    "gl_FragColor = vec4( texColor, 1.0 );",
+    `gl_FragColor = vec4( mix( texColor, ${BELOW_HORIZON}, smoothstep( 0.0, -0.03, direction.y ) ), 1.0 );`
+  );
   return sky;
 }
 
