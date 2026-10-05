@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import Scene from "./Scene";
+import { FLY_SPEED_EVENT } from "./FlyControls";
 import SunControls from "./SunControls";
 import InfoPanel from "./InfoPanel";
 import { LocalFile, ingestFiles, revokeAll } from "@/lib/localFiles";
@@ -24,6 +25,13 @@ export default function ViewerUI() {
   const [showLog, setShowLog] = useState(true);
   const [geo, setGeo] = useState<GeoJsonData | null>(null);
   const [fitTrigger, setFitTrigger] = useState(0);
+  const [flySpeed, setFlySpeed] = useState<number | null>(null);
+
+  useEffect(() => {
+    const onSpeed = (e: Event) => setFlySpeed(Number((e as CustomEvent).detail));
+    window.addEventListener(FLY_SPEED_EVENT, onSpeed);
+    return () => window.removeEventListener(FLY_SPEED_EVENT, onSpeed);
+  }, []);
   const [dragOver, setDragOver] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -291,7 +299,8 @@ export default function ViewerUI() {
 
           {hasScene && !loading && (
             <div className="footer-hint">
-              ЛКМ — вращение · ПКМ — панорама · Колесо — зум · «В кадр» — подогнать
+              WASD — полёт · Q/E — вниз/вверх · Shift — быстрее · мышь с зажатой кнопкой — обзор · колесо — скорость
+              {flySpeed !== null && <span className="fly-speed"> · {flySpeed < 10 ? flySpeed.toFixed(1) : Math.round(flySpeed)} м/с</span>}
             </div>
           )}
         </>

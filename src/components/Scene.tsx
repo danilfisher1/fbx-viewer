@@ -1,7 +1,6 @@
 "use client";
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
 import { EffectComposer, N8AO, Bloom, ToneMapping } from "@react-three/postprocessing";
 import { ToneMappingMode } from "postprocessing";
 import { Suspense, useEffect, useMemo, useState } from "react";
@@ -11,6 +10,7 @@ import { EXRLoader } from "three/addons/loaders/EXRLoader.js";
 import { log } from "@/lib/logger";
 import LocalModelLoader, { SceneBounds } from "./LocalModelLoader";
 import CameraFit from "./CameraFit";
+import FlyControls from "./FlyControls";
 import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
 import { LocalFile } from "@/lib/localFiles";
 import { sunDirection } from "@/lib/sunPresets";
@@ -25,12 +25,6 @@ interface Props {
   fitTrigger: number;
   onGeoLoaded: (geo: GeoJsonData | null) => void;
   onProgress: (p: LoadProgress) => void;
-}
-
-/** Цвет неба у горизонта: от тёплого при низком солнце к светло-голубому днём. */
-function horizonColor(sunY: number): THREE.Color {
-  const t = THREE.MathUtils.clamp(sunY / 0.6, 0, 1);
-  return new THREE.Color("#d9b48f").lerp(new THREE.Color("#c4d3df"), t);
 }
 
 const SKY_PARAMS = { turbidity: 3, rayleigh: 1.2, mieCoefficient: 0.004, mieDirectionalG: 0.8 };
@@ -94,8 +88,7 @@ function EnvironmentSystem({ sun }: { sun: SunState }) {
     sky.material.uniforms.sunPosition.value.set(x, y, z);
     sky.visible = !night;
     scene.background = night ? new THREE.Color("#05070d") : null;
-    // Дымка у горизонта — атмосферная перспектива, как в движке.
-    scene.fog = night ? new THREE.Fog("#05070d", 600, 4000) : new THREE.Fog(horizonColor(y), 900, 5500);
+    scene.fog = null;
   }, [scene, sky, sun.azimuth, sun.elevation, night]);
 
   useEffect(() => {
@@ -216,16 +209,7 @@ export default function Scene({
         />
       </Suspense>
       <CameraFit fitTrigger={fitTrigger} padding={1.8} />
-      <OrbitControls
-        makeDefault
-        enableDamping
-        dampingFactor={0.08}
-        zoomSpeed={1.6}
-        zoomToCursor
-        minDistance={1}
-        maxDistance={10000}
-        maxPolarAngle={Math.PI * 0.49}
-      />
+      <FlyControls />
       {/* Постобработка как в realtime-движке: AO в стыках, мягкий bloom бликов, тонмаппинг AgX (как в Blender). */}
       <EffectComposer multisampling={4} enableNormalPass={false}>
         <N8AO aoRadius={2.5} distanceFalloff={1} intensity={2.5} quality="medium" halfRes />

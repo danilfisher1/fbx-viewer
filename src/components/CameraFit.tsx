@@ -2,9 +2,9 @@
 
 import { useEffect, useRef } from "react";
 import { useThree } from "@react-three/fiber";
-import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import * as THREE from "three";
 import { log } from "@/lib/logger";
+import { FLY_FIT_EVENT } from "./FlyControls";
 
 interface Props {
   fitTrigger: number;
@@ -12,7 +12,7 @@ interface Props {
 }
 
 export default function CameraFit({ fitTrigger, padding = 1.6 }: Props) {
-  const { scene, camera, controls } = useThree();
+  const { scene, camera } = useThree();
   const lastTrigger = useRef(0);
 
   useEffect(() => {
@@ -70,17 +70,12 @@ export default function CameraFit({ fitTrigger, padding = 1.6 }: Props) {
       camera.updateProjectionMatrix();
       camera.lookAt(center);
 
-      const orbit = controls as unknown as OrbitControlsImpl | null;
-      if (orbit && typeof orbit.target !== "undefined") {
-        orbit.target.copy(center);
-        orbit.minDistance = Math.max(1, maxDim * 0.05);
-        orbit.maxDistance = Math.max(800, distance * 4);
-        orbit.update();
-      }
+      // Скорость полёта — под размер сцены (~10 с от края до края).
+      window.dispatchEvent(new CustomEvent(FLY_FIT_EVENT, { detail: maxDim / 10 }));
     });
 
     return () => cancelAnimationFrame(id);
-  }, [fitTrigger, scene, camera, controls, padding]);
+  }, [fitTrigger, scene, camera, padding]);
 
   return null;
 }
