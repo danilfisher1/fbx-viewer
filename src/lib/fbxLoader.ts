@@ -1,6 +1,13 @@
 import * as THREE from "three";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
-import { groupUdimTextures, createMaterialFromTextures, applyGlassParams } from "./textureUtils";
+import {
+  buildTextureSets,
+  createGlassMaterial,
+  createTileMaterial,
+  isGlassMaterialName,
+  materialSetKey,
+  udimTile,
+} from "./textureUtils";
 import { GeoJsonData, GlassParams } from "./types";
 import { log } from "./logger";
 
@@ -22,128 +29,186 @@ export function loadFBX(
   });
 }
 
+/**
+ * Материалы ВПМ: по имени материала находим UDIM-набор, режем меш по UV-тайлам
+ * (группы геометрии) и на каждый тайл ставим свой материал. Стекло — из geojson.
+ * Материалы без своего набора текстур не трогаем.
+ */
 export async function applyExternalTextures(
   group: THREE.Group,
   textureFiles: { name: string; url: string }[],
   glassMap: Record<string, GlassParams> = {}
 ): Promise<void> {
-  if (!textureFiles.length) {
-    log.info("Внешних текстур нет — используем вложенные в FBX");
-    // Still apply glass params if we have them
-    if (Object.keys(glassMap).length) {
-      group.traverse((child) => {
-        if (!(child as THREE.Mesh).isMesh) return;
-        const mesh = child as THREE.Mesh;
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        const next = mats.map((m) => {
-          if (!m) return m;
-          const name = m.name || "";
-          if (!name) return m;
-          const key = Object.keys(glassMap).find(
-            (k) => name.includes(k) || k.includes(name) || name.toLowerCase().includes("glass")
-          );
-          if (key) return applyGlassParams(m, glassMap[key]);
-          return m;
-        });
-        mesh.material = Array.isArray(mesh.material) ? next : next[0];
-      });
+  const sets = buildTextureSets(textureFiles);
+  const glassKeys = Object.keys(glassMap);
+  const findGlass = (name: string): GlassParams | undefined => {
+    if (glassMap[name]) return glassMap[name];
+    const lower = name.toLowerCase();
+    const k = glassKeys.find((g) => g.toLowerCase() === lower);
+    if (k) return glassMap[k];
+    if (isGlassMaterialName(name) && glassKeys.length) {
+      const base = materialSetKey(name);
+      const same = glassKeys.find((g) => materialSetKey(g) === base);
+      return glassMap[same ?? glassKeys[0]];
     }
-    return;
-  }
+    return undefined;
+  };
 
-  const groups = groupUdimTextures(textureFiles);
-  const materials = new Map<string, THREE.Material>();
+  const shared = new Map<string, Promise<THREE.Material>>();
+  const getShared = (key: string, make: () => Promise<THREE.Material>) => {
+    let p = shared.get(key);
+    if (!p) {
+      p = make();
+      shared.set(key, p);
+    }
+    return p;
+  };
+
+  const matNames = new Set<string>();
+  const missing = new Set<string>();
+  const jobs: Promise<void>[] = [];
 
   group.traverse((child) => {
-    if ((child as THREE.Mesh).isMesh) {
-      const mesh = child as THREE.Mesh;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((m) => {
-        if (m && m.name) materials.set(m.name, m);
-      });
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || child.name.toLowerCase().startsWith("ucx_")) return;
+    const geom = mesh.geometry as THREE.BufferGeometry;
+    const srcMats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const uv = geom.getAttribute("uv") as THREE.BufferAttribute | undefined;
+    const index = geom.getIndex();
+    const vertCount = index ? index.count : geom.getAttribute("position").count;
+    const srcGroups = geom.groups.length ? geom.groups : [{ start: 0, count: vertCount, materialIndex: 0 }];
+
+    // ключ слота → [индекс нового материала, фабрика]
+    const slots = new Map<string, number>();
+    const slotMakers: (() => Promise<THREE.Material>)[] = [];
+    const buckets: number[][] = [];
+    const slotFor = (mi: number, tile: number): number => {
+      const src = srcMats[mi] ?? srcMats[0];
+      const name = src?.name ?? "";
+      if (name) matNames.add(name);
+      let key: string;
+      let make: () => Promise<THREE.Material>;
+      const glass = name ? findGlass(name) : undefined;
+      const set = name && !glass ? sets.get(materialSetKey(name) ?? "") : undefined;
+      if (glass) {
+        key = `glass:${name}`;
+        make = () => getShared(key, async () => createGlassMaterial(glass, name));
+      } else if (set) {
+        const t = set.maps.diffuse.has(tile) || set.maps.diffuse.size === 0 ? tile : Math.min(...set.maps.diffuse.keys());
+        key = `set:${set.key}:${t}`;
+        make = () => getShared(key, () => createTileMaterial(set, t));
+      } else {
+        if (name && !isGlassMaterialName(name)) missing.add(name);
+        key = `keep:${mi}`;
+        make = async () => src;
+      }
+      let slot = slots.get(key);
+      if (slot === undefined) {
+        slot = slotMakers.length;
+        slots.set(key, slot);
+        slotMakers.push(make);
+        buckets.push([]);
+      }
+      return slot;
+    };
+
+    for (const g of srcGroups) {
+      const end = Math.min(g.start + g.count, vertCount);
+      for (let i = g.start; i + 2 < end; i += 3) {
+        const a = index ? index.getX(i) : i;
+        const b = index ? index.getX(i + 1) : i + 1;
+        const c = index ? index.getX(i + 2) : i + 2;
+        const tile = uv
+          ? udimTile((uv.getX(a) + uv.getX(b) + uv.getX(c)) / 3, (uv.getY(a) + uv.getY(b) + uv.getY(c)) / 3)
+          : 1001;
+        buckets[slotFor(g.materialIndex ?? 0, tile)].push(a, b, c);
+      }
     }
+    if (!slotMakers.length) return;
+
+    const total = buckets.reduce((n, b) => n + b.length, 0);
+    const arr = new Uint32Array(total);
+    geom.clearGroups();
+    let offset = 0;
+    buckets.forEach((b, slot) => {
+      arr.set(b, offset);
+      geom.addGroup(offset, b.length, slot);
+      offset += b.length;
+    });
+    geom.setIndex(new THREE.BufferAttribute(arr, 1));
+
+    jobs.push(
+      Promise.all(slotMakers.map((m) => m())).then((mats) => {
+        mesh.material = mats.length === 1 ? mats[0] : mats;
+      })
+    );
   });
 
-  log.info(`Материалов в модели: ${materials.size}, внешних текстур: ${textureFiles.length}`);
-
-  for (const [matName, oldMat] of Array.from(materials.entries())) {
-    const isGlass =
-      matName.toLowerCase().includes("glass") ||
-      Object.keys(glassMap).some((k) => matName.includes(k) || k.includes(matName));
-
-    let glassParams: GlassParams | undefined;
-    if (isGlass) {
-      for (const [key, val] of Object.entries(glassMap)) {
-        if (matName.includes(key) || key.includes(matName) || matName.toLowerCase().includes("glass")) {
-          glassParams = val;
-          break;
-        }
-      }
-      if (!glassParams && Object.keys(glassMap).length) {
-        glassParams = Object.values(glassMap)[0];
-      }
-    }
-
-    try {
-      const own = textureFiles.filter((t) => t.name.toLowerCase().includes(matName.toLowerCase()));
-      const matGroups = own.length ? groupUdimTextures(own) : groups;
-      const newMat = await createMaterialFromTextures(matGroups, isGlass, glassParams);
-      group.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          const mesh = child as THREE.Mesh;
-          if (Array.isArray(mesh.material)) {
-            mesh.material = mesh.material.map((m) => (m && m.name === matName ? newMat : m));
-          } else if (mesh.material && mesh.material.name === matName) {
-            mesh.material = newMat;
-          }
-        }
-      });
-    } catch (e) {
-      log.warn(`Текстуры не применились к материалу ${matName}`, e);
-      if (isGlass && glassParams) {
-        const glassMat = applyGlassParams(oldMat, glassParams);
-        group.traverse((child) => {
-          if ((child as THREE.Mesh).isMesh) {
-            const mesh = child as THREE.Mesh;
-            if (Array.isArray(mesh.material)) {
-              mesh.material = mesh.material.map((m) => (m && m.name === matName ? glassMat : m));
-            } else if (mesh.material && mesh.material.name === matName) {
-              mesh.material = glassMat;
-            }
-          }
-        });
-      }
-    }
-  }
+  log.info(`Материалов в модели: ${matNames.size}, UDIM-наборов текстур: ${sets.size}, материалов-тайлов: ${shared.size}`);
+  if (missing.size) log.warn(`Нет текстур для материалов: ${Array.from(missing).join(", ")}`);
+  await Promise.all(jobs);
 }
 
-export function extractLights(lightGroup: THREE.Group): THREE.Light[] {
-  const lights: THREE.Light[] = [];
-
-  lightGroup.traverse((child) => {
-    if ((child as THREE.Object3D & { isLight?: boolean }).isLight) {
-      lights.push(child as THREE.Light);
-      return;
-    }
-
-    const name = child.name.toLowerCase();
-    if (name.includes("omni") || name.includes("point")) {
-      const light = new THREE.PointLight(0xffffff, 1, 80);
-      light.position.copy(child.position);
-      light.rotation.copy(child.rotation);
-      light.scale.copy(child.scale);
-      light.name = child.name;
-      lights.push(light);
-    } else if (name.includes("spot")) {
-      const light = new THREE.SpotLight(0xffffff, 1, 80, Math.PI / 6, 0.5);
-      light.position.copy(child.position);
-      light.rotation.copy(child.rotation);
-      light.name = child.name;
-      lights.push(light);
+/** НПМ: текстуры вшиты в FBX и уже назначены FBXLoader-ом — только чиним цветовые пространства и UCX. */
+export function fixEmbeddedMaterials(group: THREE.Group): void {
+  group.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of mats as THREE.MeshPhongMaterial[]) {
+      if (!m) continue;
+      if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+      if (m.emissiveMap) m.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+      if (m.normalMap) m.normalMap.colorSpace = THREE.LinearSRGBColorSpace;
+      if (m.alphaMap) {
+        m.transparent = true;
+        m.alphaTest = 0.5;
+      }
+      m.side = THREE.DoubleSide;
     }
   });
+}
 
-  log.info(`Источников света из FBX: ${lights.length}`, lights.map((l) => l.name));
+/**
+ * Источники света в мировых координатах. Вызывать после позиционирования и updateMatrixWorld.
+ * Spot у three.js светит в target (по умолчанию — в начало координат, за 15 км от сцены),
+ * поэтому target ставим по направлению -Z самого объекта.
+ */
+export function extractLights(lightGroup: THREE.Group): THREE.Light[] {
+  const lights: THREE.Light[] = [];
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  const dir = new THREE.Vector3();
+
+  lightGroup.traverse((child) => {
+    const isLight = (child as THREE.Object3D & { isLight?: boolean }).isLight;
+    const name = child.name.toLowerCase();
+    let light: THREE.Light | null = null;
+    if (isLight) {
+      const src = child as THREE.Light;
+      light = src.clone() as THREE.Light;
+    } else if (name.includes("omni") || name.includes("point")) {
+      light = new THREE.PointLight(0xffffff, 1, 80);
+    } else if (name.includes("spot")) {
+      light = new THREE.SpotLight(0xffffff, 1, 80, Math.PI / 6, 0.5);
+    }
+    if (!light) return;
+    child.getWorldPosition(pos);
+    child.getWorldQuaternion(quat);
+    light.name = child.name;
+    light.position.copy(pos);
+    light.quaternion.copy(quat);
+    light.scale.set(1, 1, 1);
+    const spot = light as THREE.SpotLight;
+    if (spot.isSpotLight) {
+      dir.set(0, 0, -1).applyQuaternion(quat);
+      spot.target = new THREE.Object3D();
+      spot.target.position.copy(pos).addScaledVector(dir, 10);
+    }
+    lights.push(light);
+  });
+
+  log.info(`Источников света из FBX: ${lights.length}`);
   return lights;
 }
 
@@ -192,14 +257,16 @@ export function applyGeoPosition(group: THREE.Group, geo: GeoJsonData | null): v
   let coords: unknown = feature.geometry?.coordinates;
   while (Array.isArray(coords) && Array.isArray(coords[0])) coords = coords[0];
   if (!Array.isArray(coords) || coords.length < 2) return;
+  // geojson: X — восток, Y — север (как в Blender, Z-up). В three.js Y — вверх, север — это -Z.
   const x = Number(coords[0]);
-  const z = Number(coords[1]);
-  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+  const y = Number(coords[1]);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
     log.warn("geojson: координаты не число — позиция не применена");
     return;
   }
-  log.info(`Позиция из geojson: x=${x}, z=${z}`);
-  group.position.set(x, 0, z);
+  const h = Number(coords[2] ?? feature.properties?.h_relief ?? 0) || 0;
+  log.info(`Позиция из geojson: X=${x}, Y=${y}, отметка рельефа ${h} м`);
+  group.position.set(x, h, -y);
 }
 
 export function collectGlassParams(geo: GeoJsonData | null): Record<string, GlassParams> {

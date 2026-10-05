@@ -10,6 +10,7 @@ import {
   applyGeoPositionSmart,
   limitLights,
   collectGlassParams,
+  fixEmbeddedMaterials,
 } from "@/lib/fbxLoader";
 import { SceneManifest, GeoJsonData, LoadProgress } from "@/lib/types";
 import { LocalFile, readGeoJsonFromFile, buildUrlMap } from "@/lib/localFiles";
@@ -200,7 +201,7 @@ export default function LocalModelLoader({
               detail: `${Math.round(r * 100)}% файла`,
             });
           });
-          await applyExternalTextures(group, allTextures, {});
+          fixEmbeddedMaterials(group);
           if (cancelled) {
             disposeObject(group);
             return;
@@ -248,8 +249,9 @@ export default function LocalModelLoader({
 
       if (!cancelled) {
         limitLights(allLights).forEach((l) => {
-          l.updateWorldMatrix(true, false);
-          lightsGroup.attach(l);
+          lightsGroup.add(l);
+          const spot = l as THREE.SpotLight;
+          if (spot.isSpotLight) lightsGroup.add(spot.target);
         });
       }
 

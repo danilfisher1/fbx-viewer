@@ -1,176 +1,181 @@
 import * as THREE from "three";
 import { GlassParams } from "./types";
 
-const textureLoader = new THREE.TextureLoader();
+/**
+ * Текстуры ВПМ — UDIM-наборы `T_<база>_<Карта>_<N>.<тайл>.png` (Diffuse / ERM / Normal).
+ * В Blender: Diffuse → Base Color (sRGB), ERM → Separate Color (G → Roughness, B → Metallic),
+ * Normal → Normal Map (tangent). three.js читает roughness из G и metalness из B — один ERM
+ * подходит в обе карты без перепаковки.
+ */
 
-export function loadTexture(url: string): Promise<THREE.Texture> {
-  return new Promise((resolve, reject) => {
-    textureLoader.load(
-      url,
-      (tex) => {
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.flipY = false;
-        resolve(tex);
-      },
-      undefined,
-      reject
-    );
-  });
+/** Тайлы 2048px десятками съедают гигабайты видеопамяти — ужимаем при загрузке. */
+export const MAX_TEXTURE_SIZE = 1024;
+const LOAD_CONCURRENCY = 6;
+
+export type MapKind = "diffuse" | "erm" | "normal" | "opacity";
+
+export interface TextureSet {
+  key: string;
+  maps: Record<MapKind, Map<number, string>>;
 }
 
-export function loadTextureLinear(url: string): Promise<THREE.Texture> {
-  return new Promise((resolve, reject) => {
-    textureLoader.load(
-      url,
-      (tex) => {
-        tex.colorSpace = THREE.LinearSRGBColorSpace;
-        tex.flipY = false;
-        resolve(tex);
-      },
-      undefined,
-      reject
-    );
-  });
-}
+const KIND_ALIASES: Record<string, MapKind> = {
+  diffuse: "diffuse",
+  basecolor: "diffuse",
+  albedo: "diffuse",
+  d: "diffuse",
+  erm: "erm",
+  normal: "normal",
+  n: "normal",
+  opacity: "opacity",
+  alpha: "opacity",
+  o: "opacity",
+};
 
-export function getUdimTile(filename: string): number | null {
-  const match = filename.match(/\.(\d{4})\.(png|jpg|jpeg|tga|webp)$/i);
-  if (match) return parseInt(match[1], 10);
-  return null;
-}
+const TEXTURE_RE = /^T_(.+)_([A-Za-z]+)_(\d+)(?:\.(\d{4}))?\.(png|jpe?g|tga|webp)$/i;
 
-export function groupUdimTextures(
-  textureFiles: { name: string; url: string }[]
-): Record<string, Record<number, string>> {
-  const result: Record<string, Record<number, string>> = {
-    diffuse: {},
-    normal: {},
-    erm: {},
-    roughness: {},
-    metallic: {},
-    ao: {},
-    opacity: {},
+export function parseTextureName(name: string): { setKey: string; kind: MapKind; tile: number } | null {
+  const m = name.match(TEXTURE_RE);
+  if (!m) return null;
+  const kind = KIND_ALIASES[m[2].toLowerCase()];
+  if (!kind) return null;
+  return {
+    setKey: `${m[1]}_${Number(m[3])}`.toLowerCase(),
+    kind,
+    tile: m[4] ? Number(m[4]) : 1001,
   };
+}
 
-  for (const t of textureFiles) {
-    const tile = getUdimTile(t.name);
-    const lower = t.name.toLowerCase();
-    let mapType: string | null = null;
-
-    if (lower.includes("diffuse") || lower.includes("_d_") || lower.includes("albedo") || lower.includes("basecolor")) {
-      mapType = "diffuse";
-    } else if (lower.includes("normal") || lower.includes("_n_")) {
-      mapType = "normal";
-    } else if (lower.includes("erm")) {
-      mapType = "erm";
-    } else if (lower.includes("roughness") || lower.includes("_r_")) {
-      mapType = "roughness";
-    } else if (lower.includes("metallic") || lower.includes("metalness") || lower.includes("_m_")) {
-      mapType = "metallic";
-    } else if (lower.includes("opacity") || lower.includes("_o_") || lower.includes("alpha")) {
-      mapType = "opacity";
-    } else if (lower.includes("ao") || lower.includes("occlusion")) {
-      mapType = "ao";
+export function buildTextureSets(files: { name: string; url: string }[]): Map<string, TextureSet> {
+  const sets = new Map<string, TextureSet>();
+  for (const f of files) {
+    const p = parseTextureName(f.name);
+    if (!p) continue;
+    let set = sets.get(p.setKey);
+    if (!set) {
+      set = { key: p.setKey, maps: { diffuse: new Map(), erm: new Map(), normal: new Map(), opacity: new Map() } };
+      sets.set(p.setKey, set);
     }
-
-    if (mapType) {
-      const key = tile ?? 1001;
-      if (!result[mapType]) result[mapType] = {};
-      result[mapType][key] = t.url;
-    }
+    set.maps[p.kind].set(p.tile, f.url);
   }
-
-  return result;
+  return sets;
 }
 
-export async function createMaterialFromTextures(
-  groups: Record<string, Record<number, string>>,
-  isGlass = false,
-  glassParams?: GlassParams
-): Promise<THREE.Material> {
-  const maps: Record<string, THREE.Texture | null> = {
-    map: null,
-    normalMap: null,
-    roughnessMap: null,
-    metalnessMap: null,
-    aoMap: null,
-    alphaMap: null,
-  };
+/** `M_<база>_Main_1` / `M_<база>_Ground_1` / `M_<база>_Main` → ключ набора `<база>_1`. */
+export function materialSetKey(matName: string): string | null {
+  const m = matName.match(/^M_(.+?)(?:_Main[A-Za-z]*)?(?:_(\d+))?$/i);
+  if (!m) return null;
+  return `${m[1]}_${Number(m[2] ?? 1)}`.toLowerCase();
+}
 
-  const pick = (obj: Record<number, string>) => {
-    if (obj[1001]) return obj[1001];
-    const keys = Object.keys(obj).map(Number).sort((a, b) => a - b);
-    return keys.length ? obj[keys[0]] : null;
-  };
+export function isGlassMaterialName(name: string): boolean {
+  return /glass/i.test(name);
+}
 
+/** Номер UDIM-тайла треугольника по центру его UV. */
+export function udimTile(u: number, v: number): number {
+  return 1001 + Math.floor(u) + 10 * Math.floor(v);
+}
+
+// --- загрузка текстур -------------------------------------------------------
+
+let active = 0;
+const queue: (() => void)[] = [];
+async function limited<T>(fn: () => Promise<T>): Promise<T> {
+  if (active >= LOAD_CONCURRENCY) await new Promise<void>((r) => queue.push(r));
+  active++;
   try {
-    if (groups.diffuse && Object.keys(groups.diffuse).length) {
-      const url = pick(groups.diffuse);
-      if (url) maps.map = await loadTexture(url);
-    }
-    if (groups.normal && Object.keys(groups.normal).length) {
-      const url = pick(groups.normal);
-      if (url) maps.normalMap = await loadTextureLinear(url);
-    }
-    if (groups.roughness && Object.keys(groups.roughness).length) {
-      const url = pick(groups.roughness);
-      if (url) maps.roughnessMap = await loadTextureLinear(url);
-    }
-    if (groups.metallic && Object.keys(groups.metallic).length) {
-      const url = pick(groups.metallic);
-      if (url) maps.metalnessMap = await loadTextureLinear(url);
-    }
-    if (groups.ao && Object.keys(groups.ao).length) {
-      const url = pick(groups.ao);
-      if (url) maps.aoMap = await loadTextureLinear(url);
-    }
-    if (groups.opacity && Object.keys(groups.opacity).length) {
-      const url = pick(groups.opacity);
-      if (url) maps.alphaMap = await loadTextureLinear(url);
-    }
-    if (groups.erm && Object.keys(groups.erm).length && !maps.roughnessMap) {
-      const url = pick(groups.erm);
-      if (url) maps.roughnessMap = await loadTextureLinear(url);
-    }
-  } catch {
-    /* keep partial maps */
+    return await fn();
+  } finally {
+    active--;
+    queue.shift()?.();
   }
+}
 
-  if (isGlass && glassParams) {
-    const c = glassParams.color_RGB;
-    const mat = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(c.Red / 255, c.Green / 255, c.Blue / 255),
-      transparent: true,
-      opacity: 1 - glassParams.transparency,
-      roughness: glassParams.roughness,
-      metalness: glassParams.metallicity,
-      transmission: glassParams.transparency,
-      ior: glassParams.refraction,
-      thickness: 0.5,
-      side: THREE.DoubleSide,
+/**
+ * FBX-UV идут по конвенции OpenGL (v=0 внизу), поэтому картинку переворачиваем по Y
+ * (как делает сам FBXLoader). ImageBitmap игнорирует texture.flipY — переворот делаем при декодировании.
+ */
+export function loadTexture(url: string, srgb: boolean): Promise<THREE.Texture> {
+  return limited(async () => {
+    const blob = await (await fetch(url)).blob();
+    let bmp = await createImageBitmap(blob, {
+      imageOrientation: "flipY",
+      premultiplyAlpha: "none",
+      colorSpaceConversion: "none",
     });
-    if (maps.map) mat.map = maps.map;
-    if (maps.normalMap) mat.normalMap = maps.normalMap;
-    return mat;
-  }
-
-  return new THREE.MeshStandardMaterial({
-    map: maps.map,
-    normalMap: maps.normalMap,
-    roughnessMap: maps.roughnessMap,
-    metalnessMap: maps.metalnessMap,
-    aoMap: maps.aoMap,
-    alphaMap: maps.alphaMap,
-    transparent: !!maps.alphaMap,
-    side: THREE.DoubleSide,
-    roughness: maps.roughnessMap ? 1 : 0.7,
-    metalness: maps.metalnessMap ? 1 : 0.0,
+    const scale = Math.min(1, MAX_TEXTURE_SIZE / Math.max(bmp.width, bmp.height));
+    if (scale < 1) {
+      const small = await createImageBitmap(bmp, {
+        resizeWidth: Math.round(bmp.width * scale),
+        resizeHeight: Math.round(bmp.height * scale),
+        resizeQuality: "high",
+        premultiplyAlpha: "none",
+        colorSpaceConversion: "none",
+      });
+      bmp.close();
+      bmp = small;
+    }
+    const tex = new THREE.Texture(bmp as unknown as HTMLImageElement);
+    tex.flipY = false;
+    tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 8;
+    tex.needsUpdate = true;
+    return tex;
   });
 }
 
-export function applyGlassParams(material: THREE.Material, params: GlassParams): THREE.MeshPhysicalMaterial {
+const textureCache = new Map<string, Promise<THREE.Texture>>();
+function cachedTexture(url: string, srgb: boolean): Promise<THREE.Texture> {
+  let p = textureCache.get(url);
+  if (!p) {
+    p = loadTexture(url, srgb);
+    textureCache.set(url, p);
+  }
+  return p;
+}
+
+/** Вызывать при сбросе сцены: blob-URL уже отозваны, кэш должен уйти вместе с ними. */
+export function clearTextureCache() {
+  textureCache.clear();
+}
+
+/** Материал одного UDIM-тайла набора — повторяет ноды Blender. */
+export async function createTileMaterial(set: TextureSet, tile: number): Promise<THREE.MeshStandardMaterial> {
+  const url = (k: MapKind) => set.maps[k].get(tile);
+  const load = (k: MapKind, srgb: boolean) => {
+    const u = url(k);
+    return u ? cachedTexture(u, srgb).catch(() => null) : Promise.resolve(null);
+  };
+  const [map, erm, normalMap, alphaMap] = await Promise.all([
+    load("diffuse", true),
+    load("erm", false),
+    load("normal", false),
+    load("opacity", false),
+  ]);
+  const mat = new THREE.MeshStandardMaterial({
+    name: `${set.key}.${tile}`,
+    map,
+    normalMap,
+    roughnessMap: erm,
+    metalnessMap: erm,
+    roughness: erm ? 1 : 0.8,
+    metalness: erm ? 1 : 0,
+    alphaMap,
+    transparent: !!alphaMap,
+    alphaTest: alphaMap ? 0.5 : 0,
+    side: THREE.DoubleSide,
+  });
+  if (!map) mat.color.set(0xbdbdbd);
+  return mat;
+}
+
+export function createGlassMaterial(params: GlassParams, name = ""): THREE.MeshPhysicalMaterial {
   const c = params.color_RGB;
-  const mat = new THREE.MeshPhysicalMaterial({
+  return new THREE.MeshPhysicalMaterial({
+    name,
     color: new THREE.Color(c.Red / 255, c.Green / 255, c.Blue / 255),
     transparent: true,
     opacity: 1 - params.transparency,
@@ -181,8 +186,4 @@ export function applyGlassParams(material: THREE.Material, params: GlassParams):
     thickness: 0.8,
     side: THREE.DoubleSide,
   });
-  const anyMat = material as THREE.MeshStandardMaterial;
-  if (anyMat.map) mat.map = anyMat.map;
-  if (anyMat.normalMap) mat.normalMap = anyMat.normalMap;
-  return mat;
 }

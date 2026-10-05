@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { SceneFileInfo, SceneManifest, GeoJsonData, LoadProgress } from "./types";
 import { log, formatBytes } from "./logger";
+import { clearTextureCache } from "./textureUtils";
 
 export interface LocalFile {
   file: File;
@@ -291,6 +292,7 @@ export async function ingestFiles(
 
 export function revokeAll(locals: LocalFile[]) {
   locals.forEach((l) => URL.revokeObjectURL(l.objectUrl));
+  clearTextureCache();
 }
 
 export async function readGeoJsonFromFile(file: File): Promise<GeoJsonData | null> {

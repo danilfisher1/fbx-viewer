@@ -70,7 +70,7 @@ export default function Scene({
           onProgress={onProgress}
         />
         {/* Процедурное окружение: не качает HDR из интернета, работает офлайн */}
-        <Environment resolution={256} background={false} environmentIntensity={0.35}>
+        <Environment resolution={256} background={false} environmentIntensity={0.8}>
           <Lightformer form="rect" intensity={2} position={[0, 6, -8]} scale={[14, 6, 1]} />
           <Lightformer form="rect" intensity={1} position={[-8, 3, 4]} scale={[6, 6, 1]} />
           <Lightformer form="rect" intensity={1} position={[8, 3, 4]} scale={[6, 6, 1]} />
