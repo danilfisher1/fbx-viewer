@@ -1,10 +1,13 @@
 "use client";
 
-import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Environment, Lightformer } from "@react-three/drei";
-import { Suspense, useMemo } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
+import { EffectComposer, N8AO, Bloom, ToneMapping } from "@react-three/postprocessing";
+import { ToneMappingMode } from "postprocessing";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
-import LocalModelLoader from "./LocalModelLoader";
+import { Sky } from "three/addons/objects/Sky.js";
+import LocalModelLoader, { SceneBounds } from "./LocalModelLoader";
 import CameraFit from "./CameraFit";
 import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
 import { LocalFile } from "@/lib/localFiles";
@@ -22,19 +25,135 @@ interface Props {
   onProgress: (p: LoadProgress) => void;
 }
 
-function SunLight({ sun }: { sun: SunState }) {
+/** Цвет неба у горизонта: от тёплого при низком солнце к светло-голубому днём. */
+function horizonColor(sunY: number): THREE.Color {
+  const t = THREE.MathUtils.clamp(sunY / 0.6, 0, 1);
+  return new THREE.Color("#d9b48f").lerp(new THREE.Color("#c4d3df"), t);
+}
+
+const SKY_PARAMS = { turbidity: 3, rayleigh: 1.2, mieCoefficient: 0.004, mieDirectionalG: 0.8 };
+
+function makeSky(): Sky {
+  const sky = new Sky();
+  const u = sky.material.uniforms;
+  u.turbidity.value = SKY_PARAMS.turbidity;
+  u.rayleigh.value = SKY_PARAMS.rayleigh;
+  u.mieCoefficient.value = SKY_PARAMS.mieCoefficient;
+  u.mieDirectionalG.value = SKY_PARAMS.mieDirectionalG;
+  return sky;
+}
+
+/**
+ * Физическое небо: видимое — меш вокруг камеры, для отражений и рассеянного света —
+ * PMREM-карта окружения из того же неба. Пересчитывается при смене солнца (без сети, без HDR с CDN).
+ */
+function SkyEnvironment({ sun }: { sun: SunState }) {
+  const { gl, scene } = useThree();
+  const [sky] = useState(makeSky);
+  const [envSky] = useState(makeSky);
+  const [envScene] = useState(() => new THREE.Scene());
+  const night = sun.preset === "night";
+
+  useEffect(() => {
+    sky.scale.setScalar(12000);
+    sky.userData.noFit = true;
+    scene.add(sky);
+    envSky.scale.setScalar(1000);
+    envScene.add(envSky);
+    return () => {
+      scene.remove(sky);
+      envScene.remove(envSky);
+    };
+  }, [scene, sky, envScene, envSky]);
+
+  useEffect(() => {
+    const [x, y, z] = sunDirection(sun.azimuth, sun.elevation);
+    const pos = new THREE.Vector3(x, y, z);
+    sky.material.uniforms.sunPosition.value.copy(pos);
+    envSky.material.uniforms.sunPosition.value.copy(pos);
+    const pmrem = new THREE.PMREMGenerator(gl);
+    const rt = pmrem.fromScene(envScene, 0, 1, 5000);
+    pmrem.dispose();
+    scene.environment = rt.texture;
+    // Карта неба очень яркая: держим её слабой, иначе солнце и тени тонут (подобрано на реальной сцене).
+    scene.environmentIntensity = night ? 0.02 : 0.12;
+    sky.visible = !night;
+    scene.background = night ? new THREE.Color("#05070d") : null;
+    // Дымка у горизонта прячет край подложки, как атмосфера в движке.
+    scene.fog = night ? new THREE.Fog("#05070d", 600, 4000) : new THREE.Fog(horizonColor(y), 900, 5500);
+    return () => {
+      if (scene.environment === rt.texture) scene.environment = null;
+      rt.dispose();
+    };
+  }, [gl, scene, sky, envSky, envScene, sun.azimuth, sun.elevation, night]);
+
+  // Небо всегда центрировано на камере, иначе на 15 км от начала координат упрётся в far.
+  useFrame(({ camera }) => {
+    sky.position.copy(camera.position);
+  });
+  return null;
+}
+
+/**
+ * Солнце с тенями. Рамка теневой камеры — по габаритам сцены; карта перерисовывается
+ * только при изменениях (сцена статична, тысячи мешей — каждый кадр дорого).
+ */
+function SunLight({ sun, bounds, showVPM, showNPM }: { sun: SunState; bounds: SceneBounds | null; showVPM: boolean; showNPM: boolean }) {
+  const { gl } = useThree();
+  const [light] = useState(() => {
+    const l = new THREE.DirectionalLight();
+    l.castShadow = true;
+    l.shadow.mapSize.set(4096, 4096);
+    l.shadow.bias = -0.0003;
+    l.shadow.normalBias = 0.08;
+    return l;
+  });
   const dir = useMemo(() => sunDirection(sun.azimuth, sun.elevation), [sun.azimuth, sun.elevation]);
-  const dist = 500;
+
+  useEffect(() => {
+    gl.shadowMap.autoUpdate = false;
+  }, [gl]);
+
+  useEffect(() => {
+    const center = bounds ? bounds.box.getCenter(new THREE.Vector3()) : new THREE.Vector3();
+    const radius = bounds ? bounds.box.getSize(new THREE.Vector3()).length() / 2 : 100;
+    light.target.position.copy(center);
+    light.position.set(center.x + dir[0] * radius * 2, center.y + dir[1] * radius * 2, center.z + dir[2] * radius * 2);
+    const cam = light.shadow.camera;
+    cam.left = cam.bottom = -radius;
+    cam.right = cam.top = radius;
+    cam.near = 1;
+    cam.far = radius * 4;
+    cam.updateProjectionMatrix();
+    // Пресеты рассчитаны на старое освещение; на фоне неба солнцу нужно ×2.3.
+    light.intensity = sun.intensity * 2.3;
+    light.color.set(sun.color);
+    light.target.updateMatrixWorld();
+    gl.shadowMap.needsUpdate = true;
+  }, [gl, light, bounds, dir, sun.intensity, sun.color]);
+
+  useEffect(() => {
+    gl.shadowMap.needsUpdate = true;
+  }, [gl, showVPM, showNPM]);
+
   return (
     <>
-      <directionalLight
-        position={[dir[0] * dist, dir[1] * dist, dir[2] * dist]}
-        intensity={sun.intensity}
-        color={sun.color}
-      />
-      <ambientLight intensity={sun.preset === "night" ? 0.08 : 0.25} />
-      <hemisphereLight args={[sun.preset === "night" ? "#1a1a2e" : "#b1e1ff", "#444", 0.35]} />
+      <primitive object={light} />
+      <primitive object={light.target} />
+      {sun.preset === "night" && <ambientLight intensity={0.05} color="#8090c0" />}
     </>
+  );
+}
+
+/** Земля вокруг участка: горизонт и приёмник теней, чуть ниже отметки рельефа. */
+function GroundPlane({ bounds }: { bounds: SceneBounds | null }) {
+  if (!bounds) return null;
+  const c = bounds.box.getCenter(new THREE.Vector3());
+  return (
+    <mesh position={[c.x, bounds.groundY - 0.2, c.z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow userData={{ noFit: true }}>
+      <circleGeometry args={[6000, 64]} />
+      <meshStandardMaterial color="#5f6058" roughness={1} metalness={0} />
+    </mesh>
   );
 }
 
@@ -49,16 +168,22 @@ export default function Scene({
   onGeoLoaded,
   onProgress,
 }: Props) {
+  const [bounds, setBounds] = useState<SceneBounds | null>(null);
   return (
     <Canvas
-      dpr={[1, 2]}
+      dpr={[1, 1.5]}
+      shadows={{ type: THREE.PCFSoftShadowMap }}
       camera={{ position: [30, 40, 60], fov: 45, near: 0.1, far: 20000 }}
-      gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.0 }}
+      gl={{ antialias: false, powerPreference: "high-performance", stencil: false }}
       onCreated={({ gl }) => {
         gl.setClearColor("#1a1a1e");
+        // Экспозиция для ToneMapping-эффекта (AgX берёт её у рендерера): физическое небо очень яркое.
+        gl.toneMappingExposure = 0.75;
       }}
     >
-      <SunLight sun={sun} />
+      <SkyEnvironment sun={sun} />
+      <SunLight sun={sun} bounds={bounds} showVPM={showVPM} showNPM={showNPM} />
+      <GroundPlane bounds={bounds} />
       <Suspense fallback={null}>
         <LocalModelLoader
           locals={locals}
@@ -68,23 +193,26 @@ export default function Scene({
           showLights={showLights}
           onGeoLoaded={onGeoLoaded}
           onProgress={onProgress}
+          onBounds={setBounds}
         />
-        {/* Процедурное окружение: не качает HDR из интернета, работает офлайн */}
-        <Environment resolution={256} background={false} environmentIntensity={0.8}>
-          <Lightformer form="rect" intensity={2} position={[0, 6, -8]} scale={[14, 6, 1]} />
-          <Lightformer form="rect" intensity={1} position={[-8, 3, 4]} scale={[6, 6, 1]} />
-          <Lightformer form="rect" intensity={1} position={[8, 3, 4]} scale={[6, 6, 1]} />
-        </Environment>
       </Suspense>
       <CameraFit fitTrigger={fitTrigger} padding={1.8} />
       <OrbitControls
         makeDefault
         enableDamping
         dampingFactor={0.08}
+        zoomSpeed={1.6}
+        zoomToCursor
         minDistance={1}
         maxDistance={10000}
         maxPolarAngle={Math.PI * 0.49}
       />
+      {/* Постобработка как в realtime-движке: AO в стыках, мягкий bloom бликов, тонмаппинг AgX (как в Blender). */}
+      <EffectComposer multisampling={4} enableNormalPass={false}>
+        <N8AO aoRadius={2.5} distanceFalloff={1} intensity={2.5} quality="medium" halfRes />
+        <Bloom mipmapBlur luminanceThreshold={4} luminanceSmoothing={0.5} intensity={0.25} />
+        <ToneMapping mode={ToneMappingMode.AGX} />
+      </EffectComposer>
     </Canvas>
   );
 }

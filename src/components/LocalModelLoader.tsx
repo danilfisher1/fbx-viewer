@@ -10,7 +10,9 @@ import {
   applyGeoPositionSmart,
   limitLights,
   collectGlassParams,
-  fixEmbeddedMaterials,
+  loadFBXWithEmbedded,
+  applyEmbeddedPbr,
+  setupShadows,
 } from "@/lib/fbxLoader";
 import { SceneManifest, GeoJsonData, LoadProgress } from "@/lib/types";
 import { LocalFile, readGeoJsonFromFile, buildUrlMap } from "@/lib/localFiles";
@@ -24,6 +26,13 @@ interface Props {
   showLights: boolean;
   onGeoLoaded?: (geo: GeoJsonData | null) => void;
   onProgress?: (p: LoadProgress) => void;
+  /** Габариты сцены и отметка земли — для солнца/теней и подложки. */
+  onBounds?: (b: SceneBounds | null) => void;
+}
+
+export interface SceneBounds {
+  box: THREE.Box3;
+  groundY: number;
 }
 
 export default function LocalModelLoader({
@@ -34,6 +43,7 @@ export default function LocalModelLoader({
   showLights,
   onGeoLoaded,
   onProgress,
+  onBounds,
 }: Props) {
   const { scene } = useThree();
   const [root] = useState(() => new THREE.Group());
@@ -75,6 +85,7 @@ export default function LocalModelLoader({
     let cancelled = false;
 
     async function runLoad() {
+      onBounds?.(null);
       if (!locals.length) {
         onProgress?.({ phase: "idle", percent: 0, message: "" });
         return;
@@ -173,6 +184,7 @@ export default function LocalModelLoader({
             if (c.name.toLowerCase().startsWith("ucx_")) toRemove.push(c);
           });
           toRemove.forEach((c) => c.parent?.remove(c));
+          setupShadows(group);
           vpmGroup.add(group);
           log.ok(`${model.name}: meshes=${meshes}, UCX снято=${toRemove.length}`);
         } catch (e) {
@@ -193,7 +205,7 @@ export default function LocalModelLoader({
         }
         log.info(label);
         try {
-          const group = await loadFBX(url, (r) => {
+          const { group, embedded } = await loadFBXWithEmbedded(url, (r) => {
             onProgress?.({
               phase: "models",
               percent: 48 + Math.round(((doneJobs + r) / totalJobs) * 50),
@@ -201,7 +213,12 @@ export default function LocalModelLoader({
               detail: `${Math.round(r * 100)}% файла`,
             });
           });
-          fixEmbeddedMaterials(group);
+          if (cancelled) {
+            disposeObject(group);
+            return;
+          }
+          await applyEmbeddedPbr(group, embedded);
+          setupShadows(group);
           if (cancelled) {
             disposeObject(group);
             return;
@@ -256,6 +273,13 @@ export default function LocalModelLoader({
       }
 
       if (!cancelled) {
+        root.updateMatrixWorld(true);
+        const box = new THREE.Box3();
+        [vpmGroup, npmGroup].forEach((g) => box.expandByObject(g));
+        if (!box.isEmpty()) {
+          const h = Number(mainGeo?.features?.[0]?.properties?.h_relief);
+          onBounds?.({ box, groundY: Number.isFinite(h) ? h : box.min.y });
+        }
         onProgress?.({ phase: "done", percent: 100, message: "Готово" });
       }
     }

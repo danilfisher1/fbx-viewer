@@ -7,11 +7,41 @@ import {
   isGlassMaterialName,
   materialSetKey,
   udimTile,
+  createPbrMaterial,
+  loadTextureFromBlob,
+  DEFAULT_GLASS,
 } from "./textureUtils";
+import { parseEmbeddedMaterials, EmbeddedMaterial } from "./fbxEmbedded";
 import { GeoJsonData, GlassParams } from "./types";
 import { log } from "./logger";
 
 const fbxLoader = new FBXLoader();
+const fileLoader = new THREE.FileLoader().setResponseType("arraybuffer");
+
+/** FBX + его вшитые материалы/текстуры (для НПМ). Файл читается один раз. */
+export function loadFBXWithEmbedded(
+  url: string,
+  onProgress?: (ratio: number) => void
+): Promise<{ group: THREE.Group; embedded: EmbeddedMaterial[] }> {
+  return new Promise((resolve, reject) => {
+    fileLoader.load(
+      url,
+      (data) => {
+        try {
+          const buffer = data as ArrayBuffer;
+          const embedded = parseEmbeddedMaterials(buffer);
+          resolve({ group: fbxLoader.parse(buffer, ""), embedded });
+        } catch (e) {
+          reject(e);
+        }
+      },
+      (e) => {
+        if (e.lengthComputable && e.total > 0) onProgress?.(e.loaded / e.total);
+      },
+      reject
+    );
+  });
+}
 
 export function loadFBX(
   url: string,
@@ -149,23 +179,81 @@ export async function applyExternalTextures(
   await Promise.all(jobs);
 }
 
-/** НПМ: текстуры вшиты в FBX и уже назначены FBXLoader-ом — только чиним цветовые пространства и UCX. */
-export function fixEmbeddedMaterials(group: THREE.Group): void {
+/** Атласы НПМ — по одному на здание, их можно держать крупнее тайлов ВПМ. */
+const NPM_TEXTURE_SIZE = 2048;
+
+/** Роль карты НПМ по суффиксу имени (`_d_`, `_r_`, `_m_`, `_o_`, `_n_`), иначе — по слоту FBX. */
+function embeddedRole(t: { fileName: string; slot: string }): "map" | "roughnessMap" | "metalnessMap" | "alphaMap" | "normalMap" | null {
+  const m = t.fileName.match(/_([dmron])_d+.[a-z]+$/i);
+  const byName = { d: "map", r: "roughnessMap", m: "metalnessMap", o: "alphaMap", n: "normalMap" } as const;
+  if (m) return byName[m[1].toLowerCase() as keyof typeof byName];
+  const slot = t.slot.toLowerCase();
+  if (slot.includes("diffuse")) return "map";
+  if (slot.includes("shininess")) return "roughnessMap";
+  if (slot.includes("reflection")) return "metalnessMap";
+  if (slot.includes("transparen")) return "alphaMap";
+  if (slot.includes("normal") || slot.includes("bump")) return "normalMap";
+  return null;
+}
+
+/**
+ * НПМ: собираем PBR-материалы из вшитых в FBX карт — FBXLoader подключает только Diffuse,
+ * а roughness (ShininessExponent), metallic (ReflectionFactor) и opacity (TransparencyFactor) теряет.
+ */
+export async function applyEmbeddedPbr(group: THREE.Group, embedded: EmbeddedMaterial[]): Promise<void> {
+  const byName = new Map(embedded.map((m) => [m.name, m]));
+  const built = new Map<string, Promise<THREE.Material>>();
+  const build = (src: THREE.Material): Promise<THREE.Material> => {
+    const name = src.name;
+    let p = built.get(name);
+    if (p) return p;
+    const em = byName.get(name);
+    if (isGlassMaterialName(name) && !em?.textures.length) {
+      p = Promise.resolve(createGlassMaterial(DEFAULT_GLASS, name));
+    } else if (em?.textures.length) {
+      p = (async () => {
+        const maps: Record<string, THREE.Texture | null> = {};
+        await Promise.all(
+          em.textures.map(async (t) => {
+            const role = embeddedRole(t);
+            if (!role || maps[role]) return;
+            const blob = new Blob([t.data as BlobPart]);
+            maps[role] = await loadTextureFromBlob(blob, role === "map", NPM_TEXTURE_SIZE).catch(() => null);
+          })
+        );
+        return createPbrMaterial(name, maps);
+      })();
+    } else {
+      p = Promise.resolve(src);
+    }
+    built.set(name, p);
+    return p;
+  };
+
+  const jobs: Promise<void>[] = [];
   group.traverse((child) => {
     const mesh = child as THREE.Mesh;
     if (!mesh.isMesh) return;
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    for (const m of mats as THREE.MeshPhongMaterial[]) {
-      if (!m) continue;
-      if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
-      if (m.emissiveMap) m.emissiveMap.colorSpace = THREE.SRGBColorSpace;
-      if (m.normalMap) m.normalMap.colorSpace = THREE.LinearSRGBColorSpace;
-      if (m.alphaMap) {
-        m.transparent = true;
-        m.alphaTest = 0.5;
-      }
-      m.side = THREE.DoubleSide;
-    }
+    jobs.push(
+      Promise.all(mats.map((m) => (m ? build(m) : Promise.resolve(m)))).then((next) => {
+        mesh.material = Array.isArray(mesh.material) ? next : next[0];
+      })
+    );
+  });
+  await Promise.all(jobs);
+  const withMaps = embedded.filter((m) => m.textures.length).length;
+  log.info(`Вшитых материалов: ${embedded.length}, с картами PBR: ${withMaps}`);
+}
+
+/** Тени: всё отбрасывает и принимает, кроме стекла (иначе фасады за ним в черноте). */
+export function setupShadows(group: THREE.Object3D): void {
+  group.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    mesh.castShadow = !mats.every((m) => m?.userData.isGlass);
+    mesh.receiveShadow = true;
   });
 }
 
@@ -188,9 +276,9 @@ export function extractLights(lightGroup: THREE.Group): THREE.Light[] {
       const src = child as THREE.Light;
       light = src.clone() as THREE.Light;
     } else if (name.includes("omni") || name.includes("point")) {
-      light = new THREE.PointLight(0xffffff, 1, 80);
+      light = new THREE.PointLight(0xfff1d6, 1, 30, 2);
     } else if (name.includes("spot")) {
-      light = new THREE.SpotLight(0xffffff, 1, 80, Math.PI / 6, 0.5);
+      light = new THREE.SpotLight(0xfff1d6, 1, 40, Math.PI / 5, 0.6, 2);
     }
     if (!light) return;
     child.getWorldPosition(pos);
@@ -199,6 +287,8 @@ export function extractLights(lightGroup: THREE.Group): THREE.Light[] {
     light.position.copy(pos);
     light.quaternion.copy(quat);
     light.scale.set(1, 1, 1);
+    // three.js считает в канделах: значения из FBX (~1) ночью не видны вовсе.
+    light.intensity = Math.max(light.intensity, 60);
     const spot = light as THREE.SpotLight;
     if (spot.isSpotLight) {
       dir.set(0, 0, -1).applyQuaternion(quat);

@@ -92,19 +92,38 @@ async function limited<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Есть ли в PNG альфа-канал: тип цвета 4/6 или чанк tRNS до первого IDAT. */
+async function pngHasAlpha(blob: Blob): Promise<boolean> {
+  const head = new Uint8Array(await blob.slice(0, 65536).arrayBuffer());
+  if (head.length < 33 || head[0] !== 0x89 || head[1] !== 0x50) return false;
+  const colorType = head[25];
+  if (colorType === 4 || colorType === 6) return true;
+  const dv = new DataView(head.buffer);
+  let p = 8;
+  while (p + 8 <= head.length) {
+    const len = dv.getUint32(p);
+    const type = String.fromCharCode(head[p + 4], head[p + 5], head[p + 6], head[p + 7]);
+    if (type === "tRNS") return true;
+    if (type === "IDAT") return false;
+    p += 12 + len;
+  }
+  return false;
+}
+
 /**
  * FBX-UV идут по конвенции OpenGL (v=0 внизу), поэтому картинку переворачиваем по Y
  * (как делает сам FBXLoader). ImageBitmap игнорирует texture.flipY — переворот делаем при декодировании.
+ * В userData.hasAlpha — есть ли у картинки прозрачность.
  */
-export function loadTexture(url: string, srgb: boolean): Promise<THREE.Texture> {
+export function loadTextureFromBlob(blob: Blob, srgb: boolean, maxSize = MAX_TEXTURE_SIZE): Promise<THREE.Texture> {
   return limited(async () => {
-    const blob = await (await fetch(url)).blob();
+    const hasAlpha = await pngHasAlpha(blob);
     let bmp = await createImageBitmap(blob, {
       imageOrientation: "flipY",
       premultiplyAlpha: "none",
       colorSpaceConversion: "none",
     });
-    const scale = Math.min(1, MAX_TEXTURE_SIZE / Math.max(bmp.width, bmp.height));
+    const scale = Math.min(1, maxSize / Math.max(bmp.width, bmp.height));
     if (scale < 1) {
       const small = await createImageBitmap(bmp, {
         resizeWidth: Math.round(bmp.width * scale),
@@ -122,9 +141,15 @@ export function loadTexture(url: string, srgb: boolean): Promise<THREE.Texture> 
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
     tex.anisotropy = 8;
+    tex.userData.hasAlpha = hasAlpha;
     tex.needsUpdate = true;
     return tex;
   });
+}
+
+export async function loadTexture(url: string, srgb: boolean): Promise<THREE.Texture> {
+  const blob = await (await fetch(url)).blob();
+  return loadTextureFromBlob(blob, srgb);
 }
 
 const textureCache = new Map<string, Promise<THREE.Texture>>();
@@ -155,35 +180,66 @@ export async function createTileMaterial(set: TextureSet, tile: number): Promise
     load("normal", false),
     load("opacity", false),
   ]);
+  return createPbrMaterial(`${set.key}.${tile}`, { map, normalMap, roughnessMap: erm, metalnessMap: erm, alphaMap });
+}
+
+export interface PbrMaps {
+  map?: THREE.Texture | null;
+  normalMap?: THREE.Texture | null;
+  roughnessMap?: THREE.Texture | null;
+  metalnessMap?: THREE.Texture | null;
+  alphaMap?: THREE.Texture | null;
+}
+
+/**
+ * Общий PBR-материал. Прозрачность — вырезом (alphaTest + alpha-to-coverage при MSAA):
+ * листва, сетки, ограждения не требуют сортировки и корректно отбрасывают тени.
+ */
+export function createPbrMaterial(name: string, m: PbrMaps): THREE.MeshStandardMaterial {
+  const cutout = !!m.alphaMap || !!m.map?.userData.hasAlpha;
   const mat = new THREE.MeshStandardMaterial({
-    name: `${set.key}.${tile}`,
-    map,
-    normalMap,
-    roughnessMap: erm,
-    metalnessMap: erm,
-    roughness: erm ? 1 : 0.8,
-    metalness: erm ? 1 : 0,
-    alphaMap,
-    transparent: !!alphaMap,
-    alphaTest: alphaMap ? 0.5 : 0,
+    name,
+    map: m.map ?? null,
+    normalMap: m.normalMap ?? null,
+    roughnessMap: m.roughnessMap ?? null,
+    metalnessMap: m.metalnessMap ?? null,
+    roughness: m.roughnessMap ? 1 : 0.8,
+    metalness: m.metalnessMap ? 1 : 0,
+    alphaMap: m.alphaMap ?? null,
+    alphaTest: cutout ? 0.5 : 0,
+    alphaToCoverage: cutout,
     side: THREE.DoubleSide,
   });
-  if (!map) mat.color.set(0xbdbdbd);
+  if (!m.map) mat.color.set(0xbdbdbd);
   return mat;
 }
 
+/** Стекло без параметров в geojson (НПМ). */
+export const DEFAULT_GLASS: GlassParams = {
+  color_RGB: { Red: 200, Green: 215, Blue: 225 },
+  transparency: 0.6,
+  refraction: 1.5,
+  roughness: 0.05,
+  metallicity: 0.3,
+};
+
+/**
+ * Стекло через transmission (а не opacity): видно интерьер/объекты за ним, отражается небо
+ * из карты окружения, нет проблем с сортировкой прозрачных. Теней не отбрасывает.
+ */
 export function createGlassMaterial(params: GlassParams, name = ""): THREE.MeshPhysicalMaterial {
   const c = params.color_RGB;
-  return new THREE.MeshPhysicalMaterial({
+  const mat = new THREE.MeshPhysicalMaterial({
     name,
     color: new THREE.Color(c.Red / 255, c.Green / 255, c.Blue / 255),
-    transparent: true,
-    opacity: 1 - params.transparency,
     roughness: params.roughness,
     metalness: params.metallicity,
     transmission: Math.min(params.transparency, 0.95),
     ior: params.refraction || 1.45,
-    thickness: 0.8,
+    thickness: 0.02,
+    specularIntensity: 1,
     side: THREE.DoubleSide,
   });
+  mat.userData.isGlass = true;
+  return mat;
 }

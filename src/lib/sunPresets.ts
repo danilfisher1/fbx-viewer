@@ -7,8 +7,9 @@ export const SUN_PRESETS: Record<SunPreset, Omit<SunState, "preset">> = {
   night: { azimuth: 0, elevation: 5, intensity: 0.15, color: "#a0b0ff" },
 };
 
+/** Азимут от севера по часовой (90° — восток, 180° — юг). В сцене север — это -Z. */
 export function sunDirection(azimuthDeg: number, elevationDeg: number): [number, number, number] {
   const az = (azimuthDeg * Math.PI) / 180;
   const el = (elevationDeg * Math.PI) / 180;
-  return [Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)];
+  return [Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az)];
 }
