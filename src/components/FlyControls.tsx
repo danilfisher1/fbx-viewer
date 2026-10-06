@@ -21,6 +21,23 @@ const MAX_SPEED = 1000;
 const LOOK_SENSITIVITY = 0.0025;
 const ACCEL = 10; // плавность разгона/торможения
 
+/**
+ * Колесо: скорость меняется пропорционально величине прокрутки, а не числу событий.
+ * Обычная мышь шлёт ~100 px на щелчок, а MX Master и тачпады в бесшаговом режиме —
+ * десятки мелких событий по несколько px: при «×1.15 на событие» скорость улетала до максимума.
+ */
+const WHEEL_NOTCH_PX = 100; // один щелчок колеса в Chrome/Edge на Windows
+const WHEEL_STEP = 1.15; // множитель скорости на один щелчок
+const WHEEL_MAX_PX_PER_EVENT = 300; // рывок раскрученного колеса — не больше трёх щелчков за событие
+/** Лимит темпа: за окно 0.2 с — не больше ~4 щелчков (×1.75), лишняя прокрутка отбрасывается. */
+const WHEEL_WINDOW_MS = 200;
+const WHEEL_MAX_PX_PER_WINDOW = 400;
+
+function wheelPixels(e: WheelEvent): number {
+  const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 800 : 1; // строки / страницы → px
+  return THREE.MathUtils.clamp(e.deltaY * unit, -WHEEL_MAX_PX_PER_EVENT, WHEEL_MAX_PX_PER_EVENT);
+}
+
 const MOVE_KEYS: Record<string, [number, number, number]> = {
   KeyW: [0, 0, 1],
   KeyS: [0, 0, -1],
@@ -40,6 +57,7 @@ export default function FlyControls({ initialSpeed = 15 }: { initialSpeed?: numb
   const speed = useRef(initialSpeed);
   const velocity = useRef(new THREE.Vector3());
   const drag = useRef<{ button: number; yaw: number; pitch: number } | null>(null);
+  const wheelWindow = useRef({ start: 0, used: 0 });
 
   useEffect(() => {
     const el = gl.domElement;
@@ -87,7 +105,17 @@ export default function FlyControls({ initialSpeed = 15 }: { initialSpeed?: numb
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const factor = Math.pow(1.15, -Math.sign(e.deltaY));
+      const now = performance.now();
+      const win = wheelWindow.current;
+      if (now - win.start > WHEEL_WINDOW_MS) {
+        win.start = now;
+        win.used = 0;
+      }
+      const px = wheelPixels(e);
+      const allowed = Math.min(Math.abs(px), Math.max(0, WHEEL_MAX_PX_PER_WINDOW - win.used));
+      if (allowed <= 0) return;
+      win.used += allowed;
+      const factor = Math.pow(WHEEL_STEP, (-Math.sign(px) * allowed) / WHEEL_NOTCH_PX);
       speed.current = THREE.MathUtils.clamp(speed.current * factor, MIN_SPEED, MAX_SPEED);
       window.dispatchEvent(new CustomEvent(FLY_SPEED_EVENT, { detail: speed.current }));
     };
