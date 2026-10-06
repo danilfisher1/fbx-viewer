@@ -82,8 +82,13 @@ function LoginForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function shareUrl(slug: string) {
-  return `${window.location.origin}/p/${slug}`;
+/**
+ * Ссылка для отправки. С версией превью в адресе: мессенджеры кэшируют карточку по URL,
+ * и после пересъёмки превью новая ссылка сразу покажет свежую картинку.
+ */
+function shareUrl(p: Project) {
+  const base = `${window.location.origin}/p/${p.slug}`;
+  return p.preview_v ? `${base}?v=${p.preview_v.toString(36)}` : base;
 }
 
 function ProjectsAdmin() {
@@ -114,9 +119,9 @@ function ProjectsAdmin() {
     }
   };
 
-  const copy = async (slug: string) => {
-    await navigator.clipboard.writeText(shareUrl(slug));
-    setCopied(slug);
+  const copy = async (p: Project) => {
+    await navigator.clipboard.writeText(shareUrl(p));
+    setCopied(p.slug);
     setTimeout(() => setCopied(null), 1500);
   };
 
@@ -202,9 +207,10 @@ function ProjectsAdmin() {
                       {`/p/${p.slug}`}
                     </a>
                     <span className="muted small">{p.yandex_url}</span>
+                    <span className="muted small">{p.preview_v ? "Превью есть" : "Превью нет — откройте проект и нажмите «Сделать превью»"}</span>
                   </div>
                   <div className="admin-actions">
-                    <button className="btn small primary" onClick={() => copy(p.slug)}>
+                    <button className="btn small primary" onClick={() => copy(p)}>
                       {copied === p.slug ? "Скопировано" : "Копировать ссылку"}
                     </button>
                     <button className="btn small" onClick={() => setEditing(p)}>
