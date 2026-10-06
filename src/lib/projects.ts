@@ -15,12 +15,20 @@ export interface Project {
   name: string;
   yandex_url: string;
   created_at: string;
+  /** Версия картинки-превью для ссылок (меняется при пересъёмке — сбрасывает кэш мессенджеров). */
+  preview_v?: number;
 }
 
 export interface PublicProject {
   name: string;
   yandexUrl: string;
+  slug: string;
+  /** Абсолютный адрес сайта — для og:image / og:url. */
+  origin: string;
+  previewVersion?: number;
 }
+
+export const previewBlobPath = (slug: string) => `previews/${slug}.jpg`;
 
 const COOKIE = "fbx_admin";
 const PROJECTS_PATH = "projects.json";
@@ -171,5 +179,57 @@ export const getProjectBySlug = createServerFn({ method: "GET" })
   .inputValidator((d: { slug: string }) => d)
   .handler(async ({ data }): Promise<PublicProject | null> => {
     const p = (await readProjects()).find((x) => x.slug === String(data.slug ?? ""));
-    return p ? { name: p.name, yandexUrl: p.yandex_url } : null;
+    if (!p) return null;
+    const { getRequestUrl } = await import("@tanstack/react-start/server");
+    return {
+      name: p.name,
+      yandexUrl: p.yandex_url,
+      slug: p.slug,
+      origin: getRequestUrl({ xForwardedHost: true, xForwardedProto: true }).origin,
+      previewVersion: p.preview_v,
+    };
   });
+
+/** Админ: можно ли показывать кнопку «Сделать превью» на странице проекта. */
+export const canEditPreview = createServerFn({ method: "GET" }).handler(async () => isAdmin());
+
+/** Админ: сохранить снимок модели (JPEG 1200×630, data URL) как превью ссылки. */
+export const savePreview = createServerFn({ method: "POST" })
+  .inputValidator((d: { slug: string; dataUrl: string }) => d)
+  .handler(async ({ data }) => {
+    await requireAdmin();
+    const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(data.dataUrl ?? ""));
+    if (!m) throw new Error("Ожидался JPEG");
+    const bytes = Buffer.from(m[1], "base64");
+    if (bytes.length > 3_000_000) throw new Error("Превью слишком большое");
+    const list = await readProjects();
+    const p = list.find((x) => x.slug === String(data.slug ?? ""));
+    if (!p) throw new Error("Проект не найден");
+    if (process.env.BLOB_READ_WRITE_TOKEN) {
+      const { put } = await import("@vercel/blob");
+      await put(previewBlobPath(p.slug), bytes, {
+        access: "private",
+        allowOverwrite: true,
+        addRandomSuffix: false,
+        contentType: "image/jpeg",
+      });
+    } else {
+      previewMemory.set(p.slug, bytes);
+    }
+    p.preview_v = Date.now();
+    await writeProjects(list);
+    return { ok: true, version: p.preview_v };
+  });
+
+const previewMemory = ((globalThis as typeof globalThis & { __fbxPreviews__?: Map<string, Buffer> }).__fbxPreviews__ ??=
+  new Map<string, Buffer>());
+
+/** Для серверного маршрута /preview/<slug>: байты картинки или null. */
+export async function readPreview(slug: string): Promise<Uint8Array | null> {
+  if (!/^[A-Za-z0-9_-]{4,32}$/.test(slug)) return null;
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return previewMemory.get(slug) ?? null;
+  const { get } = await import("@vercel/blob");
+  const res = await get(previewBlobPath(slug), { access: "private", useCache: false });
+  if (!res) return null;
+  return new Uint8Array(await new Response(res.stream).arrayBuffer());
+}

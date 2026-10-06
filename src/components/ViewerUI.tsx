@@ -10,7 +10,8 @@ import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types"
 import { SUN_PRESETS } from "@/lib/sunPresets";
 import { log, LogEntry, subscribeLogs, formatBytes } from "@/lib/logger";
 import { downloadYandexProject } from "@/lib/yandexDisk";
-import type { PublicProject } from "@/lib/projects";
+import { canEditPreview, savePreview, type PublicProject } from "@/lib/projects";
+import { requestCapture } from "./PreviewCapture";
 
 interface ViewerUIProps {
   /** Проект по ссылке /p/<slug>: модель скачивается с Яндекс Диска автоматически. */
@@ -114,6 +115,36 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
     []
   );
 
+  // Админ на странице проекта может снять превью для карточки ссылки (как «В кадр»).
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [previewState, setPreviewState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [fitPadding, setFitPadding] = useState(1.8);
+  useEffect(() => {
+    if (remote) canEditPreview().then(setIsAdmin).catch(() => setIsAdmin(false));
+  }, [remote]);
+  const makePreview = useCallback(async () => {
+    if (!remote) return;
+    setPreviewState("busy");
+    try {
+      setShowLog(false);
+      // Карточка 1200×630 вырезается из центра окна: чем уже окно, тем больше срежется сверху/снизу,
+      // поэтому запас вокруг модели считаем от пропорций окна (широкий экран — модель крупнее).
+      const keepHeight = Math.min(1, window.innerWidth / window.innerHeight / (1200 / 630));
+      setFitPadding(1.1 / keepHeight);
+      requestFit();
+      await new Promise((r) => setTimeout(r, 900)); // камера встала, тени и AO отрисовались
+      const dataUrl = await requestCapture();
+      setFitPadding(1.8);
+      await savePreview({ data: { slug: remote.slug, dataUrl } });
+      log.ok("Превью ссылки сохранено");
+      setPreviewState("done");
+    } catch (e) {
+      log.error("Не удалось сохранить превью", e);
+      setPreviewState("error");
+    }
+    setTimeout(() => setPreviewState("idle"), 2500);
+  }, [remote, requestFit]);
+
   // Проект по ссылке: скачать с Яндекс Диска и загрузить как выбранную папку.
   const remoteStarted = useRef(false);
   useEffect(() => {
@@ -187,6 +218,7 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
           showLights={showLights}
           sun={sun}
           fitTrigger={fitTrigger}
+          fitPadding={fitPadding}
           onGeoLoaded={setGeo}
           onProgress={onModelProgress}
         />
@@ -281,6 +313,11 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
                 <button className={showLog ? "active" : ""} onClick={() => setShowLog((v) => !v)}>
                   Лог
                 </button>
+                {remote && isAdmin && (
+                  <button onClick={makePreview} disabled={previewState === "busy"} title="Снимок «В кадр» для карточки ссылки в мессенджерах">
+                    {previewState === "busy" ? "Снимаю…" : previewState === "done" ? "Превью сохранено" : previewState === "error" ? "Ошибка превью" : "Сделать превью"}
+                  </button>
+                )}
                 {!remote && <button onClick={() => folderInputRef.current?.click()}>+ Папка</button>}
                 {!remote && <button onClick={clearScene}>Сброс</button>}
               </div>

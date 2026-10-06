@@ -97,6 +97,8 @@ export default async function grokPwaMiddleware(
   }
 
   if (!isDocumentPath(path)) return next();
+  // Страницы проектов несут свои og-теги (название + снимок модели) — общий инжектор их бы вырезал.
+  if (path.startsWith("/p/")) return next();
 
   const result = await next();
   if (

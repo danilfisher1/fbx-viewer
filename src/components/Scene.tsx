@@ -11,6 +11,7 @@ import { log } from "@/lib/logger";
 import LocalModelLoader, { SceneBounds } from "./LocalModelLoader";
 import CameraFit from "./CameraFit";
 import FlyControls from "./FlyControls";
+import PreviewCapture from "./PreviewCapture";
 import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
 import { LocalFile } from "@/lib/localFiles";
 import { sunDirection } from "@/lib/sunPresets";
@@ -23,6 +24,8 @@ interface Props {
   showLights: boolean;
   sun: SunState;
   fitTrigger: number;
+  /** Запас вокруг модели при «В кадр» (меньше — плотнее; для превью ссылки). */
+  fitPadding?: number;
   onGeoLoaded: (geo: GeoJsonData | null) => void;
   onProgress: (p: LoadProgress) => void;
 }
@@ -184,6 +187,7 @@ export default function Scene({
   showLights,
   sun,
   fitTrigger,
+  fitPadding = 1.8,
   onGeoLoaded,
   onProgress,
 }: Props) {
@@ -215,8 +219,9 @@ export default function Scene({
           onBounds={setBounds}
         />
       </Suspense>
-      <CameraFit fitTrigger={fitTrigger} padding={1.8} />
+      <CameraFit fitTrigger={fitTrigger} padding={fitPadding} />
       <FlyControls />
+      <PreviewCapture />
       {/* Постобработка как в realtime-движке: AO в стыках, мягкий bloom бликов, тонмаппинг AgX (как в Blender). */}
       <EffectComposer multisampling={4} enableNormalPass={false}>
         <N8AO aoRadius={2.5} distanceFalloff={1} intensity={2.5} quality="medium" halfRes />
