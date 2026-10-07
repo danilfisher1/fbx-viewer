@@ -31,8 +31,10 @@ if (files.Count > 0)
 }
 else
 {
-    Console.WriteLine("Рядом с программой нет папок «Высокополигональная» / «Низкополигональная» —");
+    Console.WriteLine("Рядом с программой нет папки «Низкополигональная» с моделями —");
     Console.WriteLine("в браузере откроется экран выбора папки проекта.");
+    Console.WriteLine("Положите программу рядом с папками «Высокополигональная» и «Низкополигональная»");
+    Console.WriteLine("(или только «Низкополигональная»).");
 }
 Console.WriteLine();
 Console.WriteLine($"Открываю браузер: {origin}");
@@ -151,17 +153,23 @@ static Dictionary<string, byte[]> LoadSite()
     return dict;
 }
 
-/// Папки ВПМ / НПМ рядом с exe (по слову «полигональн» в имени — как в выгрузке АГР).
-/// Если их нет, но рядом лежат архивы / FBX — берём их (до 3 уровней вложенности).
+/// Строгий поиск: модели берутся ТОЛЬКО из папок «Низкополигональная» (обязательна)
+/// и «Высокополигональная» (если есть) рядом с exe. Больше ничего не сканируется —
+/// exe на рабочем столе или в чужой папке не тронет посторонние архивы.
 static List<ModelFile> FindModelFiles(string root)
 {
+    const string Npm = "Низкополигональная";
+    const string Vpm = "Высокополигональная";
     var exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".zip", ".fbx", ".geojson", ".json", ".png", ".jpg", ".jpeg", ".tga", ".webp" };
     var result = new List<ModelFile>();
 
+    string? Branch(string name) => Directory.EnumerateDirectories(root)
+        .FirstOrDefault(d => string.Equals(Path.GetFileName(d).Trim(), name, StringComparison.OrdinalIgnoreCase));
+
     void Walk(string dir, int depth)
     {
-        if (depth > 6) return;
+        if (depth > 4) return; // внутри папки ВПМ/НПМ: архивы или папки моделей, глубже не нужно
         IEnumerable<string> entries;
         try { entries = Directory.EnumerateFiles(dir); } catch { return; }
         foreach (var f in entries)
@@ -173,17 +181,12 @@ static List<ModelFile> FindModelFiles(string root)
         try { foreach (var d in Directory.EnumerateDirectories(dir)) Walk(d, depth + 1); } catch { }
     }
 
-    var branchDirs = Directory.EnumerateDirectories(root)
-        .Where(d => Path.GetFileName(d).Contains("полигональн", StringComparison.OrdinalIgnoreCase))
-        .ToList();
-    if (branchDirs.Count > 0)
-    {
-        foreach (var d in branchDirs) Walk(d, 1);
-    }
-    else
-    {
-        Walk(root, 4); // только до 3 уровней вниз — не обходим весь диск, если exe лежит не там
-    }
+    var npm = Branch(Npm);
+    if (npm is null) return result; // нет НПМ — это не папка проекта: экран выбора папки
+    Walk(npm, 1);
+    var vpm = Branch(Vpm);
+    if (vpm is not null) Walk(vpm, 1);
+
     if (!result.Any(f => f.Rel.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) || f.Rel.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)))
         result.Clear();
     return result;
