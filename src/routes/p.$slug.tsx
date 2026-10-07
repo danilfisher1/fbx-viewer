@@ -1,6 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import ViewerUI from "@/components/ViewerUI";
-import { getProjectBySlug } from "@/lib/projects";
+import { useMemo } from "react";
+import ViewerUI, { type ProjectSource } from "@/components/ViewerUI";
+import { canEditPreview, getProjectBySlug, savePreview } from "@/lib/projects";
+import { downloadYandexProject } from "@/lib/yandexDisk";
 
 /** Ссылка для архитекторов: /p/<slug> — модель грузится с Яндекс Диска сама, ничего выбирать не нужно. */
 export const Route = createFileRoute("/p/$slug")({
@@ -38,7 +40,22 @@ export const Route = createFileRoute("/p/$slug")({
 
 function ProjectPage() {
   const project = Route.useLoaderData();
-  if (!project) {
+  const source = useMemo<ProjectSource | null>(
+    () =>
+      project && {
+        name: project.name,
+        verb: "Скачивание",
+        load: (onProgress) => downloadYandexProject(project.yandexUrl, onProgress),
+        preview: {
+          canEdit: () => canEditPreview(),
+          save: async (dataUrl) => {
+            await savePreview({ data: { slug: project.slug, dataUrl } });
+          },
+        },
+      },
+    [project]
+  );
+  if (!project || !source) {
     return (
       <div className="viewer-root">
         <div className="drop-zone">
@@ -50,5 +67,5 @@ function ProjectPage() {
       </div>
     );
   }
-  return <ViewerUI remote={project} />;
+  return <ViewerUI remote={source} />;
 }

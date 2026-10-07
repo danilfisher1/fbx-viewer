@@ -27,3 +27,10 @@ artifacts/
 screenshots/
 public/scenes/
 .node_modules.lock
+
+# exe-версия: сборки и готовый exe не коммитим
+/dist-local
+/release
+/launcher/bin
+/launcher/obj
+/launcher/site.zip

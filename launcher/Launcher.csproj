@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    3D-просмотр.exe: кладётся рядом с папками «Высокополигональная» / «Низкополигональная»,
+    поднимает локальный сервер на localhost и открывает в браузере вшитый вьювер с этими моделями.
+    Собирается командой `npm run build:exe` (она же вшивает свежую сборку вьювера — site.zip).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>FbxViewerLauncher</AssemblyName>
+    <RootNamespace>FbxViewerLauncher</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <DebuggerSupport>false</DebuggerSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <Product>3D-просмотр</Product>
+    <Description>Локальный просмотр 3D-моделей ВПМ / НПМ</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="site.zip" LogicalName="site.zip" />
+  </ItemGroup>
+
+</Project>

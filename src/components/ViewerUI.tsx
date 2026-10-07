@@ -9,13 +9,23 @@ import { LocalFile, ingestFiles, revokeAll } from "@/lib/localFiles";
 import { SceneManifest, SunState, GeoJsonData, LoadProgress } from "@/lib/types";
 import { SUN_PRESETS } from "@/lib/sunPresets";
 import { log, LogEntry, subscribeLogs, formatBytes } from "@/lib/logger";
-import { downloadYandexProject } from "@/lib/yandexDisk";
-import { canEditPreview, savePreview, type PublicProject } from "@/lib/projects";
 import { requestCapture } from "./PreviewCapture";
 
+/**
+ * Готовый проект, который грузится сам, без выбора папки: по ссылке /p/<slug> — с Яндекс Диска,
+ * в exe-версии — из папок рядом с программой. Вьювер не знает, откуда файлы: это решает источник.
+ */
+export interface ProjectSource {
+  name: string;
+  /** «Скачивание» / «Чтение» — для строки прогресса. */
+  verb: string;
+  load: (onProgress: (p: { loaded: number; total: number; file: string }) => void) => Promise<File[]>;
+  /** Кнопка «Сделать превью» для карточки ссылки (только сайт, только админ). */
+  preview?: { canEdit: () => Promise<boolean>; save: (dataUrl: string) => Promise<void> };
+}
+
 interface ViewerUIProps {
-  /** Проект по ссылке /p/<slug>: модель скачивается с Яндекс Диска автоматически. */
-  remote?: PublicProject;
+  remote?: ProjectSource;
 }
 
 export default function ViewerUI({ remote }: ViewerUIProps = {}) {
@@ -120,10 +130,10 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
   const [previewState, setPreviewState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [fitPadding, setFitPadding] = useState(1.8);
   useEffect(() => {
-    if (remote) canEditPreview().then(setIsAdmin).catch(() => setIsAdmin(false));
+    remote?.preview?.canEdit().then(setIsAdmin).catch(() => setIsAdmin(false));
   }, [remote]);
   const makePreview = useCallback(async () => {
-    if (!remote) return;
+    if (!remote?.preview) return;
     setPreviewState("busy");
     try {
       setShowLog(false);
@@ -135,7 +145,7 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
       await new Promise((r) => setTimeout(r, 900)); // камера встала, тени и AO отрисовались
       const dataUrl = await requestCapture();
       setFitPadding(1.8);
-      await savePreview({ data: { slug: remote.slug, dataUrl } });
+      await remote.preview.save(dataUrl);
       log.ok("Превью ссылки сохранено");
       setPreviewState("done");
     } catch (e) {
@@ -145,24 +155,25 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
     setTimeout(() => setPreviewState("idle"), 2500);
   }, [remote, requestFit]);
 
-  // Проект по ссылке: скачать с Яндекс Диска и загрузить как выбранную папку.
+  // Готовый проект: получить файлы из источника и загрузить как выбранную папку.
   const remoteStarted = useRef(false);
   useEffect(() => {
     if (!remote || remoteStarted.current) return;
     remoteStarted.current = true;
     setBusy(true);
-    setProgress({ phase: "scan", percent: 0, message: `Скачивание «${remote.name}» с Яндекс Диска…` });
-    downloadYandexProject(remote.yandexUrl, ({ loaded, total, file }) => {
-      setProgress({
-        phase: "scan",
-        percent: total ? Math.round((loaded / total) * 100) : 0,
-        message: `Скачивание «${remote.name}»: ${formatBytes(loaded)} из ${formatBytes(total)}`,
-        detail: file,
-      });
-    })
+    setProgress({ phase: "scan", percent: 0, message: `${remote.verb} «${remote.name}»…` });
+    remote
+      .load(({ loaded, total, file }) => {
+        setProgress({
+          phase: "scan",
+          percent: total ? Math.round((loaded / total) * 100) : 0,
+          message: `${remote.verb} «${remote.name}»: ${formatBytes(loaded)} из ${formatBytes(total)}`,
+          detail: file,
+        });
+      })
       .then((files) => handleFiles(files))
       .catch((e) => {
-        log.error("Не удалось скачать проект с Яндекс Диска", e);
+        log.error("Не удалось получить файлы проекта", e);
         setBusy(false);
         setProgress({ phase: "done", percent: 100, message: `Ошибка: ${e instanceof Error ? e.message : e}` });
       });
@@ -313,7 +324,7 @@ export default function ViewerUI({ remote }: ViewerUIProps = {}) {
                 <button className={showLog ? "active" : ""} onClick={() => setShowLog((v) => !v)}>
                   Лог
                 </button>
-                {remote && isAdmin && (
+                {remote?.preview && isAdmin && (
                   <button onClick={makePreview} disabled={previewState === "busy"} title="Снимок «В кадр» для карточки ссылки в мессенджерах">
                     {previewState === "busy" ? "Снимаю…" : previewState === "done" ? "Превью сохранено" : previewState === "error" ? "Ошибка превью" : "Сделать превью"}
                   </button>
